@@ -1,0 +1,13 @@
+{
+  "name": "prairielearn-assignment-tracker",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "check:syntax": "node test/syntax-check.js",
+    "check:parity": "node test/parity-check.js"
+  },
+  "devDependencies": {
+    "jsdom": "^30.0.1"
+  }
+}

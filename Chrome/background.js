@@ -2,6 +2,16 @@ const STORAGE_META_KEY = "pl.meta";
 const STORAGE_COURSE_PREFIX = "pl.course.";
 const STORAGE_PINNED_KEY = "pl.pinned_assessments";
 const REFRESH_CONCURRENCY = 3;
+const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
+const CALENDAR_TOKEN_KEY = "pl.google_calendar_token";
+const CALENDAR_MAX_EVENTS = 100;
+const ext = globalThis.browser ?? globalThis.chrome;
+if (typeof importScripts === "function") {
+  // Chrome MV3 service worker. On Firefox the background page loads these via the manifest.
+  importScripts("parsing.js");
+  try { importScripts("config.js"); } catch { /* Optional maintainer-local configuration. */ }
+}
 
 chrome.runtime.onInstalled.addListener(() => {
   ensureMetaInitialized().catch((error) => {
@@ -46,6 +56,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.type === "PL_TOGGLE_ASSESSMENT_PIN") {
         const result = await toggleAssessmentPin(message.payload);
         sendResponse({ ok: true, ...result });
+        return;
+      }
+
+      if (message.type === "PL_SYNC_GOOGLE_CALENDAR") {
+        const dashboard = await buildDashboardData();
+        const result = await syncGoogleCalendar(dashboard, sender);
+        sendResponse({ ok: true, result });
+        return;
+      }
+
+      if (message.type === "PL_EXPORT_CALENDAR_ICS") {
+        const payload = message.payload || {};
+        const dashboard = await buildDashboardData();
+        const origin = getCalendarOrigin(dashboard, sender);
+        let items = [];
+        let filename = `prairielearn-deadlines-${new Date().toISOString().slice(0, 10)}.ics`;
+        if (payload.singleAssessment) {
+          if (isEligibleForCalendarAction(payload.singleAssessment, origin)) {
+            items = [payload.singleAssessment];
+            const slug = String(payload.singleAssessment.badge || payload.singleAssessment.title || "deadline")
+              .toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+            filename = `prairielearn-${slug || "assessment"}.ics`;
+          }
+        } else {
+          const allItems = getCalendarItems(dashboard, origin);
+          const scope = payload.scope || "all";
+          items = filterCalendarItemsByScope(allItems, scope, payload);
+          if (scope === "course" && payload.courseInstanceId) {
+            filename = `prairielearn-course-${payload.courseInstanceId}-deadlines.ics`;
+          } else if (scope === "week" || scope === "7days") {
+            filename = `prairielearn-next-7-days-deadlines.ics`;
+          }
+        }
+        if (!items.length) {
+          sendResponse({ ok: false, error: "No upcoming deadlines found for the selected scope." });
+          return;
+        }
+        const ics = await buildTrackerIcs(items, origin);
+        sendResponse({ ok: true, ics, count: items.length, filename });
         return;
       }
 
@@ -115,7 +164,8 @@ async function handleRefreshRequest(payload, sender) {
   if (!courseInstanceIds.length) {
     try {
       courseInstanceIds = await fetchCourseInstanceIdsFromHome(origin);
-    } catch {
+    } catch (error) {
+      console.warn("[PL Tracker] Course discovery from the home page failed:", error);
       courseInstanceIds = [];
     }
   }
@@ -340,14 +390,13 @@ async function fetchCourseInstanceIdsFromHome(origin) {
   const candidates = ["/", "/pl/"];
   for (const candidate of candidates) {
     const homeUrl = new URL(candidate, origin).toString();
-    const response = await fetch(homeUrl, { credentials: "include" });
+    const response = await fetchWithTimeout(homeUrl, { credentials: "include" });
     if (!response.ok) {
       continue;
     }
 
     const html = await response.text();
-    const doc = new DOMParser().parseFromString(html, "text/html");
-    const courseInstanceIds = extractCourseInstanceIdsFromHomeDocument(doc);
+    const courseInstanceIds = await parseHtml("EXTRACT_COURSE_INSTANCE_IDS", html);
     if (courseInstanceIds.length) {
       return courseInstanceIds;
     }
@@ -364,14 +413,13 @@ async function fetchAndParseAssessments(origin, courseInstanceId) {
     origin
   ).toString();
 
-  const response = await fetch(assessmentsUrl, { credentials: "include" });
+  const response = await fetchWithTimeout(assessmentsUrl, { credentials: "include" });
   if (!response.ok) {
     throw new Error(`Request failed with status ${response.status}.`);
   }
 
   const html = await response.text();
-  const doc = new DOMParser().parseFromString(html, "text/html");
-  const parsed = parseAssessmentsDocument(doc, {
+  const parsed = await parseHtml("PARSE_ASSESSMENTS", html, {
     origin,
     assessmentsUrl,
     courseInstanceId,
@@ -384,329 +432,115 @@ async function fetchAndParseAssessments(origin, courseInstanceId) {
   return parsed;
 }
 
-function parseAssessmentsDocument(doc, context) {
-  const tbody = doc.querySelector('table[aria-label="Assessments"] tbody');
-  if (!tbody) {
-    return null;
+// --- HTML parsing bridge -----------------------------------------------------
+//
+// Parsing PrairieLearn pages needs DOMParser. A Chrome MV3 service worker has
+// no DOM, so on Chrome we hand the HTML to an offscreen document and get plain
+// JSON back. Firefox's background page has a DOM and parses in-process.
+
+const OFFSCREEN_TARGET = "pl-tracker-offscreen";
+const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
+const OFFSCREEN_REQUEST_TIMEOUT_MS = 15000;
+const FETCH_TIMEOUT_MS = 20000;
+
+let offscreenDocumentPromise = null;
+
+function getParsing() {
+  const parsing = globalThis.PrairieLearnTrackerParsing;
+  if (!parsing) {
+    throw new Error("parsing.js was not loaded. Check the manifest and reload the extension.");
   }
-
-  const capturedAt = new Date().toISOString();
-  const courseLabel =
-    normalizeWhitespace(doc.querySelector("#main-nav .navbar-text")?.textContent) || null;
-
-  const assessments = [];
-  let currentGroup = null;
-
-  const rows = Array.from(tbody.querySelectorAll(":scope > tr"));
-  for (const row of rows) {
-    const groupHeading = row.querySelector('[data-testid="assessment-group-heading"]');
-    if (groupHeading) {
-      currentGroup = normalizeWhitespace(groupHeading.textContent);
-      continue;
-    }
-
-    const badgeElement = row.querySelector('[data-testid="assessment-set-badge"]');
-    const cells = row.querySelectorAll("td");
-    if (!badgeElement || cells.length < 4) {
-      continue;
-    }
-
-    const badge = normalizeWhitespace(badgeElement.textContent);
-
-    const titleCell = cells[1];
-    const linkElement = titleCell.querySelector("a");
-    const title = normalizeWhitespace(linkElement?.textContent || titleCell.textContent) || "Untitled";
-    const href = linkElement?.getAttribute("href") || null;
-    const absoluteUrl = href ? new URL(href, context.origin).toString() : null;
-
-    const availabilityCell = cells[2];
-    const availabilityText = normalizeWhitespace(availabilityCell.textContent) || null;
-    const popoverButton = availabilityCell.querySelector('button[data-bs-toggle="popover"]');
-    const accessWindows = parsePopoverAccessDetails(popoverButton);
-
-    const scoreCell = cells[3];
-    const score = extractScorePercentFromCell(scoreCell);
-    const scoreText = normalizeWhitespace(scoreCell.textContent);
-
-    let status = "unknown";
-    if (score) {
-      status = "scored";
-    } else if (/assessment closed/i.test(availabilityText || "") || /assessment closed/i.test(scoreText)) {
-      status = "closed";
-    } else if (/not started/i.test(scoreText)) {
-      status = "not_started";
-    } else if (scoreCell.querySelector("a.btn, button.btn")) {
-      status = "action_available";
-    } else if (scoreText) {
-      status = "text_status";
-    }
-
-    const dueAt = getEffectiveDueTimestamp(accessWindows, availabilityText);
-
-    assessments.push({
-      courseInstanceId: context.courseInstanceId,
-      courseLabel,
-      group: currentGroup,
-      badge,
-      title,
-      href,
-      absoluteUrl,
-      availabilityText,
-      accessWindows,
-      dueAt,
-      score: score || null,
-      scoreText: scoreText || null,
-      status,
-      capturedAt,
-    });
-  }
-
-  return {
-    courseInstanceId: context.courseInstanceId,
-    courseLabel,
-    origin: context.origin,
-    sourceUrl: context.assessmentsUrl,
-    assessments,
-    updatedAt: capturedAt,
-  };
+  return parsing;
 }
 
-function parsePopoverAccessDetails(buttonElement) {
-  if (!buttonElement) {
-    return [];
+function canParseInPlace() {
+  return typeof DOMParser !== "undefined" && Boolean(globalThis.PrairieLearnTrackerParsing);
+}
+
+async function parseHtml(op, html, context) {
+  if (canParseInPlace()) {
+    const parsing = getParsing();
+    return op === "PARSE_ASSESSMENTS"
+      ? parsing.parseAssessmentsHtml(html, context)
+      : parsing.extractCourseInstanceIdsFromHomeHtml(html);
   }
 
-  const raw = buttonElement.getAttribute("data-bs-content");
-  if (!raw) {
-    return [];
+  await ensureOffscreenDocument();
+  const response = await sendOffscreenRequest({ target: OFFSCREEN_TARGET, op, html, context });
+  if (!response?.ok) {
+    throw new Error(response?.error || "Offscreen parsing failed.");
   }
+  return response.data;
+}
 
-  const decodedHtml = decodeHtmlEntities(raw);
-  if (!decodedHtml) {
-    return [];
-  }
-
-  const popoverDoc = new DOMParser().parseFromString(decodedHtml, "text/html");
-  const rows = Array.from(popoverDoc.querySelectorAll("tr")).slice(1);
-  if (!rows.length) {
-    return [];
-  }
-
-  return rows.map((row) => {
-    const values = Array.from(row.querySelectorAll("td")).map((cell) =>
-      normalizeWhitespace(cell.textContent)
+async function ensureOffscreenDocument() {
+  if (!chrome.offscreen) {
+    throw new Error(
+      "This browser has no DOMParser in the background and no offscreen document API, " +
+      "so PrairieLearn pages cannot be parsed in the background."
     );
+  }
 
-    const credit = values[0] || null;
-    const start = values[1] || null;
-    const end = values[2] || null;
+  // Chrome may close an idle offscreen document, so re-check every time rather
+  // than remembering that we once created one.
+  if (await chrome.offscreen.hasDocument()) {
+    return;
+  }
 
-    return {
-      credit,
-      start,
-      end,
-      startIso: parsePrairieLearnTimestamp(start),
-      endIso: parsePrairieLearnTimestamp(end),
-    };
+  // Only one offscreen document may exist, and a refresh fans out several
+  // parses at once, so concurrent callers share a single creation promise.
+  if (!offscreenDocumentPromise) {
+    offscreenDocumentPromise = chrome.offscreen
+      .createDocument({
+        url: OFFSCREEN_DOCUMENT_PATH,
+        reasons: ["DOM_PARSER"],
+        justification: "Parse fetched PrairieLearn HTML pages, which the service worker cannot do.",
+      })
+      .catch((error) => {
+        // Lost a race with another creation: the document we need now exists.
+        if (!/single offscreen document/i.test(toErrorMessage(error))) {
+          throw error;
+        }
+      })
+      .finally(() => {
+        offscreenDocumentPromise = null;
+      });
+  }
+
+  return offscreenDocumentPromise;
+}
+
+async function sendOffscreenRequest(message) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("Timed out waiting for the offscreen parser to respond."));
+    }, OFFSCREEN_REQUEST_TIMEOUT_MS);
+
+    chrome.runtime.sendMessage(message, (response) => {
+      clearTimeout(timer);
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        reject(new Error(runtimeError.message));
+        return;
+      }
+      resolve(response);
+    });
   });
 }
 
-function extractScorePercentFromCell(scoreCell) {
-  if (!scoreCell) {
-    return null;
-  }
-
-  const directPercent = findPercentString(scoreCell.querySelector(".progress-bar")?.textContent);
-  if (directPercent) {
-    return directPercent;
-  }
-
-  const ariaCandidates = [
-    scoreCell.querySelector(".progress-bar")?.getAttribute("aria-valuenow"),
-    scoreCell.querySelector(".progress")?.getAttribute("aria-valuenow"),
-  ];
-  for (const ariaValue of ariaCandidates) {
-    const normalized = normalizeNumericPercentString(ariaValue);
-    if (normalized) {
-      return normalized;
-    }
-  }
-
-  const styleCandidates = [
-    scoreCell.querySelector(".progress-bar")?.getAttribute("style"),
-    scoreCell.querySelector(".progress")?.getAttribute("style"),
-  ];
-  for (const styleValue of styleCandidates) {
-    const widthPercent = findPercentFromStyle(styleValue);
-    if (widthPercent) {
-      return widthPercent;
-    }
-  }
-
-  return findPercentString(scoreCell.textContent);
-}
-
-function findPercentFromStyle(styleText) {
-  if (typeof styleText !== "string" || !styleText.trim()) {
-    return null;
-  }
-
-  const match = styleText.match(/width\s*:\s*([+-]?\d+(?:\.\d+)?)\s*%/i);
-  if (!match) {
-    return null;
-  }
-
-  return normalizeNumericPercentString(match[1]);
-}
-
-function findPercentString(text) {
-  if (typeof text !== "string" || !text.trim()) {
-    return null;
-  }
-
-  const match = text.match(/([+-]?\d+(?:\.\d+)?)\s*%/);
-  if (!match) {
-    return null;
-  }
-
-  return normalizeNumericPercentString(match[1]);
-}
-
-function normalizeNumericPercentString(raw) {
-  if (typeof raw !== "string" || !raw.trim()) {
-    return null;
-  }
-
-  const value = Number.parseFloat(raw.trim());
-  if (!Number.isFinite(value)) {
-    return null;
-  }
-
-  const clamped = Math.min(Math.max(value, 0), 100);
-  const rounded = Math.round(clamped * 10) / 10;
-  const formatted = Number.isInteger(rounded) ? String(rounded) : String(rounded);
-  return `${formatted}%`;
-}
-
-function getEffectiveDueTimestamp(accessWindows, availabilityText) {
-  const windows = Array.isArray(accessWindows) ? accessWindows : [];
-  const validEnds = windows
-    .map((window) => window?.endIso)
-    .filter((iso) => typeof iso === "string");
-
-  if (validEnds.length) {
-    validEnds.sort((a, b) => new Date(a).getTime() - new Date(b).getTime());
-    return validEnds[validEnds.length - 1];
-  }
-
-  return parseAvailabilityFallback(availabilityText);
-}
-
-function parsePrairieLearnTimestamp(raw) {
-  if (typeof raw !== "string" || !raw.trim()) {
-    return null;
-  }
-
-  const withoutTzLabel = raw.replace(/\s*\([^)]+\)\s*$/, "").trim();
-  if (!withoutTzLabel) {
-    return null;
-  }
-
-  let normalized = withoutTzLabel.replace(/\s+/, "T");
-  normalized = normalized.replace(/([+-]\d{2})$/, "$1:00");
-
-  const time = Date.parse(normalized);
-  if (!Number.isNaN(time)) {
-    return new Date(time).toISOString();
-  }
-
-  return null;
-}
-
-function parseAvailabilityFallback(text) {
-  if (typeof text !== "string") {
-    return null;
-  }
-
-  const match = text.match(/until\s+(\d{1,2}):(\d{2}),\s*\w{3},\s*([A-Za-z]{3})\s+(\d{1,2})/i);
-  if (!match) {
-    return null;
-  }
-
-  const hour = Number.parseInt(match[1], 10);
-  const minute = Number.parseInt(match[2], 10);
-  const monthToken = match[3].toLowerCase();
-  const day = Number.parseInt(match[4], 10);
-
-  if (
-    Number.isNaN(hour) ||
-    Number.isNaN(minute) ||
-    Number.isNaN(day) ||
-    hour < 0 ||
-    hour > 23 ||
-    minute < 0 ||
-    minute > 59 ||
-    day < 1 ||
-    day > 31
-  ) {
-    return null;
-  }
-
-  const monthLookup = {
-    jan: 0,
-    feb: 1,
-    mar: 2,
-    apr: 3,
-    may: 4,
-    jun: 5,
-    jul: 6,
-    aug: 7,
-    sep: 8,
-    oct: 9,
-    nov: 10,
-    dec: 11,
-  };
-  const month = monthLookup[monthToken];
-  if (month === undefined) {
-    return null;
-  }
-
-  const now = new Date();
-  let candidate = new Date(now.getFullYear(), month, day, hour, minute, 0);
-
-  if (candidate.getTime() < now.getTime() - 1000 * 60 * 60 * 24 * 120) {
-    candidate = new Date(now.getFullYear() + 1, month, day, hour, minute, 0);
-  }
-
-  return candidate.toISOString();
-}
-
-function decodeHtmlEntities(value) {
-  if (typeof value !== "string" || !value) {
-    return "";
-  }
-
-  const doc = new DOMParser().parseFromString(`<!doctype html><body>${value}`, "text/html");
-  return doc.body?.textContent || "";
-}
-
-function extractCourseInstanceIdsFromHomeDocument(doc) {
-  const script = doc.querySelector(
-    'script[type="application/json"][data-component="HomeCards"][data-component-props="true"]'
-  );
-  if (!script?.textContent) {
-    return [];
-  }
-
-  let parsed;
+async function fetchWithTimeout(url, options, timeoutMs = FETCH_TIMEOUT_MS) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    parsed = JSON.parse(script.textContent);
-  } catch {
-    return [];
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Request to ${url} timed out after ${timeoutMs}ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-
-  const courses = Array.isArray(parsed?.json?.studentCourses) ? parsed.json.studentCourses : [];
-  return sanitizeCourseInstanceIds(courses.map((course) => course?.course_instance?.id));
 }
 
 async function getAssessmentPinStates(payload) {
@@ -837,6 +671,8 @@ function sanitizePinnedAssessmentStore(raw) {
         ? value.absoluteUrl
         : null,
       dueAt: normalizedDueAt,
+      deadlineAt: normalizeIsoTimestamp(value.deadlineAt) || normalizedDueAt,
+      deadlineSource: typeof value.deadlineSource === "string" ? value.deadlineSource : null,
       pinnedAt: normalizeIsoTimestamp(value.pinnedAt) || new Date().toISOString(),
       updatedAt: normalizeIsoTimestamp(value.updatedAt) || new Date().toISOString(),
     };
@@ -856,6 +692,8 @@ function createPinEntryFromAssessment(assessment, identity) {
     absoluteUrl:
       identity.absoluteUrl || (typeof assessment?.absoluteUrl === "string" ? assessment.absoluteUrl : null),
     dueAt: normalizeIsoTimestamp(assessment?.dueAt),
+    deadlineAt: normalizeIsoTimestamp(assessment?.deadlineAt) || normalizeIsoTimestamp(assessment?.dueAt),
+    deadlineSource: typeof assessment?.deadlineSource === "string" ? assessment.deadlineSource : null,
     pinnedAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
@@ -871,6 +709,8 @@ function mergePinEntryWithAssessment(existing, assessment, identity) {
     href: identity.href || existing.href || null,
     absoluteUrl: identity.absoluteUrl || existing.absoluteUrl || null,
     dueAt: normalizeIsoTimestamp(assessment?.dueAt) || existing.dueAt || null,
+    deadlineAt: normalizeIsoTimestamp(assessment?.deadlineAt) || existing.deadlineAt || existing.dueAt || null,
+    deadlineSource: typeof assessment?.deadlineSource === "string" ? assessment.deadlineSource : existing.deadlineSource || null,
     updatedAt: new Date().toISOString(),
   };
 
@@ -881,7 +721,9 @@ function mergePinEntryWithAssessment(existing, assessment, identity) {
     merged.group !== existing.group ||
     merged.href !== existing.href ||
     merged.absoluteUrl !== existing.absoluteUrl ||
-    merged.dueAt !== existing.dueAt;
+    merged.dueAt !== existing.dueAt ||
+    merged.deadlineAt !== existing.deadlineAt ||
+    merged.deadlineSource !== existing.deadlineSource;
 
   return {
     changed,
@@ -981,7 +823,12 @@ async function buildDashboardData() {
 
   const snapshots = Object.entries(all)
     .filter(([key]) => key.startsWith(STORAGE_COURSE_PREFIX))
-    .map(([, value]) => value)
+    .map(([key, value]) => {
+      if (value && typeof value === "object") {
+        Object.defineProperty(value, "__storageKey", { value: key, enumerable: false, configurable: true });
+      }
+      return value;
+    })
     .filter((value) => value && Array.isArray(value.assessments));
 
   const upcoming = [];
@@ -996,10 +843,22 @@ async function buildDashboardData() {
   }
 
   for (const snapshot of snapshots) {
+    let snapshotChanged = false;
     for (const assessment of snapshot.assessments) {
       assessmentCount += 1;
       if (!assessment || typeof assessment !== "object") {
         continue;
+      }
+
+      if (assessment.deadlineSource === "legacy" || (!assessment.deadlineSource && assessment.dueAt)) {
+        const migrated = getParsing().getDeadlineInfo(
+          assessment.availabilityText,
+          assessment.accessWindows
+        );
+        assessment.deadlineAt = migrated.deadlineAt;
+        assessment.deadlineSource = migrated.deadlineSource;
+        assessment.dueAt = migrated.deadlineAt;
+        snapshotChanged = true;
       }
 
       const isClosed =
@@ -1045,6 +904,8 @@ async function buildDashboardData() {
         title: assessment.title || "Untitled",
         href: assessment.absoluteUrl || toAbsoluteAssessmentUrl(snapshot.origin, assessment.href),
         dueAt: assessment.dueAt || null,
+        deadlineAt: assessment.deadlineAt || assessment.dueAt || null,
+        deadlineSource: assessment.deadlineSource || (assessment.dueAt ? "legacy" : null),
         availabilityText: assessment.availabilityText || null,
         score: assessment.score || null,
         status: assessment.status || "unknown",
@@ -1052,6 +913,9 @@ async function buildDashboardData() {
         isPinned,
         capturedAt: assessment.capturedAt || snapshot.updatedAt || null,
       });
+    }
+    if (snapshotChanged && snapshot.__storageKey) {
+      await chrome.storage.local.set({ [snapshot.__storageKey]: snapshot });
     }
   }
 
@@ -1070,6 +934,7 @@ async function buildDashboardData() {
       pinned: pinnedCount,
     },
     upcoming,
+    calendarItems: upcoming.filter((item) => item.deadlineAt && item.deadlineSource && item.deadlineSource !== "legacy" && item.href),
   };
 }
 
@@ -1336,4 +1201,280 @@ async function mapWithConcurrency(items, concurrency, worker) {
 
   await Promise.all(runners);
   return results;
+}
+
+function getCalendarOrigin(dashboard, sender) {
+  return normalizePrairieLearnOrigin(dashboard?.meta?.origin) || getSenderOrigin(sender) || "https://us.prairielearn.com";
+}
+
+function getCalendarItems(dashboard, origin = "https://us.prairielearn.com") {
+  const now = Date.now();
+  return (Array.isArray(dashboard?.calendarItems) ? dashboard.calendarItems : [])
+    .filter((item) => item?.deadlineSource !== "legacy" && isEligibleForCalendarAction(item, origin, now));
+}
+
+function getGoogleClientId() {
+  const configured = typeof globalThis.PL_GOOGLE_CLIENT_ID === "string" ? globalThis.PL_GOOGLE_CLIENT_ID.trim() :
+    (typeof globalThis.GOOGLE_CLIENT_ID === "string" ? globalThis.GOOGLE_CLIENT_ID.trim() : "");
+  return configured && !configured.startsWith("YOUR_PUBLIC_") ? configured : "";
+}
+
+function normalizeIdentityRedirect(uri) {
+  if (typeof uri !== "string" || !uri.trim()) throw new Error("Google OAuth redirect URI is unavailable.");
+  let parsed;
+  try { parsed = new URL(uri); } catch { throw new Error("Google OAuth returned an invalid redirect URI."); }
+  if (parsed.protocol !== "https:" || !/\.(?:chromiumapp|extensions\.allizom)\.org$/i.test(parsed.hostname)) {
+    throw new Error("Google OAuth returned an unsupported redirect URI.");
+  }
+  return `${parsed.origin}/`;
+}
+
+function createOauthState() {
+  const bytes = new Uint8Array(24);
+  if (!globalThis.crypto?.getRandomValues) throw new Error("Secure random values are unavailable for Google authorization.");
+  globalThis.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function getCalendarToken(interactive) {
+  const stored = await ext.storage.local.get(CALENDAR_TOKEN_KEY);
+  const token = stored[CALENDAR_TOKEN_KEY];
+  if (token?.accessToken && Number(token.expiresAt) > Date.now() + 60_000) return token.accessToken;
+  if (!interactive) return null;
+  const clientId = getGoogleClientId();
+  if (!clientId) throw new Error("Google Calendar is not configured for this build. Download the calendar file instead.");
+  if (!ext?.identity?.getRedirectURL || !ext?.identity?.launchWebAuthFlow) throw new Error("This browser does not expose the extension identity API. Download the calendar file instead.");
+  const redirectUri = normalizeIdentityRedirect(ext.identity.getRedirectURL());
+  const state = createOauthState();
+  const params = new URLSearchParams({ client_id: clientId, response_type: "token", redirect_uri: redirectUri, scope: CALENDAR_SCOPE, state, include_granted_scopes: "true" });
+  const responseUrl = await ext.identity.launchWebAuthFlow({ url: `https://accounts.google.com/o/oauth2/v2/auth?${params}`, interactive: true });
+  if (!responseUrl) throw new Error("Google authorization was cancelled.");
+  const response = new URL(responseUrl);
+  if (response.origin !== new URL(redirectUri).origin) throw new Error("Google authorization returned an unexpected redirect.");
+  const fragment = new URLSearchParams(response.hash.slice(1));
+  if (fragment.get("state") !== state) throw new Error("Google authorization state validation failed.");
+  if (fragment.get("error")) throw new Error(fragment.get("error_description") || "Google authorization was not granted.");
+  const accessToken = fragment.get("access_token");
+  const expiresIn = Number(fragment.get("expires_in"));
+  const grantedScopes = (fragment.get("scope") || "").split(/\s+/).filter(Boolean);
+  if (!accessToken || !Number.isFinite(expiresIn) || !grantedScopes.includes(CALENDAR_SCOPE)) throw new Error("Google authorization did not grant calendar event access.");
+  await ext.storage.local.set({ [CALENDAR_TOKEN_KEY]: { accessToken, expiresAt: Date.now() + expiresIn * 1000 } });
+  return accessToken;
+}
+
+async function calendarApiRequest(path, options, token) {
+  const response = await fetch(`${CALENDAR_API_BASE}${path}`, { ...options, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", ...(options?.headers || {}) } });
+  if (!response.ok) {
+    const detail = await response.json().catch(() => ({}));
+    const error = new Error(detail?.error?.message || `Google Calendar request failed (${response.status}).`);
+    error.status = response.status;
+    throw error;
+  }
+  return response.status === 204 ? null : response.json();
+}
+
+async function syncGoogleCalendar(dashboard, sender) {
+  const origin = getCalendarOrigin(dashboard, sender);
+  const items = getCalendarItems(dashboard, origin);
+  if (items.length > CALENDAR_MAX_EVENTS) throw new Error(`Calendar sync stopped: ${items.length} future published deadlines exceed the ${CALENDAR_MAX_EVENTS}-event safety limit.`);
+  const token = await getCalendarToken(true);
+  const result = { created: 0, updated: 0, unchanged: 0, skipped: 0, failed: 0, errors: [] };
+  for (const item of items) {
+    try {
+      const event = await buildGoogleCalendarEvent(item, origin);
+      if (!event) { result.skipped += 1; continue; }
+      let existing = null;
+      try { existing = await calendarApiRequest(`/calendars/primary/events/${encodeURIComponent(event.id)}`, { method: "GET" }, token); } catch (error) { if (error.status !== 404) throw error; }
+      if (existing && existing.extendedProperties?.private?.prairieLearnTracker !== "v1") throw new Error("A non-tracker event already owns this deterministic ID.");
+      if (existing && calendarEventMatches(existing, event)) result.unchanged += 1;
+      else if (existing) { await calendarApiRequest(`/calendars/primary/events/${encodeURIComponent(event.id)}`, { method: "PUT", body: JSON.stringify(event) }, token); result.updated += 1; }
+      else {
+        try { await calendarApiRequest(`/calendars/primary/events?sendUpdates=none`, { method: "POST", body: JSON.stringify(event) }, token); result.created += 1; }
+        catch (error) { if (error.status !== 409) throw error; await calendarApiRequest(`/calendars/primary/events/${encodeURIComponent(event.id)}`, { method: "PUT", body: JSON.stringify(event) }, token); result.updated += 1; }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    } catch (error) {
+      if (error.status === 401 || error.status === 403) await ext.storage.local.remove(CALENDAR_TOKEN_KEY);
+      result.failed += 1;
+      result.errors.push(`${item.title || "Assessment"}: ${error.message}`);
+      if (error.status === 401 || error.status === 403) break;
+    }
+  }
+  return result;
+}
+
+function calendarEventMatches(existing, expected) {
+  return existing.summary === expected.summary && existing.description === expected.description && existing.start?.dateTime === expected.start.dateTime && existing.end?.dateTime === expected.end.dateTime && existing.source?.url === expected.source.url;
+}
+
+function resolvePrairieLearnAssessmentUrl(rawUrl, origin = "https://us.prairielearn.com") {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) return null;
+  const trimmed = rawUrl.trim();
+  if (/^(?:javascript|data|vbscript|file):/i.test(trimmed)) {
+    return null;
+  }
+  let base = typeof origin === "string" && origin.trim() ? origin.trim() : "https://us.prairielearn.com";
+  if (!/^https?:\/\//i.test(base)) {
+    base = `https://${base}`;
+  }
+  let baseUrl;
+  try {
+    baseUrl = new URL(base);
+  } catch {
+    return null;
+  }
+  const baseHost = baseUrl.hostname.toLowerCase();
+  if (baseHost !== "prairielearn.com" && !baseHost.endsWith(".prairielearn.com")) {
+    return null;
+  }
+
+  try {
+    const resolved = new URL(trimmed, baseUrl);
+    if (resolved.protocol !== "https:" && resolved.protocol !== "http:") {
+      return null;
+    }
+    const resolvedHost = resolved.hostname.toLowerCase();
+    if (resolvedHost !== "prairielearn.com" && !resolvedHost.endsWith(".prairielearn.com")) {
+      return null;
+    }
+    if (resolved.origin.toLowerCase() !== baseUrl.origin.toLowerCase()) {
+      return null;
+    }
+    return resolved.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isEligibleForCalendarAction(item, origin = "https://us.prairielearn.com", now = Date.now()) {
+  let targetOrigin = origin;
+  let targetNow = now;
+  if (typeof origin === "number") {
+    targetNow = origin;
+    targetOrigin = typeof now === "string" ? now : "https://us.prairielearn.com";
+  }
+  if (!item || typeof item !== "object") return false;
+  const deadline = item.deadlineAt || (item.deadlineSource ? item.dueAt : null);
+  if (!deadline) return false;
+  const isClosed =
+    item.status === "closed" ||
+    /assessment closed/i.test(item.availabilityText || "") ||
+    /assessment closed/i.test(item.scoreText || "");
+  if (isClosed) return false;
+  const href = item.href || item.absoluteUrl;
+  const resolvedUrl = resolvePrairieLearnAssessmentUrl(href, targetOrigin);
+  if (!resolvedUrl) return false;
+  const due = Date.parse(deadline);
+  return !Number.isNaN(due) && due > targetNow;
+}
+
+async function buildGoogleCalendarEvent(item, origin = "https://us.prairielearn.com") {
+  if (!isEligibleForCalendarAction(item, origin)) return null;
+  const identity = buildAssessmentIdentity(item, item.courseInstanceId, origin);
+  if (!identity || !item.deadlineAt) return null;
+  const resolvedUrl = resolvePrairieLearnAssessmentUrl(item.href || item.absoluteUrl, origin);
+  if (!resolvedUrl) return null;
+  const digest = await digestHex(`${origin}|${identity.pinId}`);
+  const end = new Date(item.deadlineAt);
+  const start = new Date(end.getTime() - 15 * 60 * 1000);
+  const badge = item.badge ? ` · ${item.badge}` : "";
+  const summary = `Due: ${item.courseLabel || "PrairieLearn"}${badge} · ${item.title || "Assessment"}`;
+  return {
+    id: `plv1${digest}`,
+    summary,
+    description: `PrairieLearn assessment deadline.\n${resolvedUrl}`,
+    source: { title: "PrairieLearn assessment", url: resolvedUrl },
+    start: { dateTime: start.toISOString() },
+    end: { dateTime: end.toISOString() },
+    transparency: "transparent",
+    extendedProperties: { private: { prairieLearnTracker: "v1", assessmentIdentity: identity.pinId } }
+  };
+}
+
+async function digestHex(value) {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function filterCalendarItemsByScope(items, scope = "all", options = {}, now = Date.now()) {
+  const list = Array.isArray(items) ? items : [];
+  const normalizedScope = String(scope || "all").toLowerCase();
+  if (normalizedScope === "course") {
+    const targetId = String(options.courseInstanceId || "").trim();
+    if (!targetId) return [];
+    return list.filter((item) => String(item.courseInstanceId || "").trim() === targetId);
+  }
+  if (normalizedScope === "week" || normalizedScope === "7days") {
+    const horizon = now + 7 * 24 * 60 * 60 * 1000;
+    return list.filter((item) => {
+      const due = Date.parse(item.deadlineAt || item.dueAt || "");
+      return !Number.isNaN(due) && due <= horizon;
+    });
+  }
+  return list;
+}
+
+function buildValarmBlocks(deadlineIso, now = Date.now()) {
+  const deadline = Date.parse(deadlineIso);
+  if (Number.isNaN(deadline)) return [];
+  const msUntil = deadline - now;
+  const blocks = [];
+  if (msUntil > 24 * 60 * 60 * 1000) {
+    blocks.push([
+      "BEGIN:VALARM",
+      "ACTION:DISPLAY",
+      "DESCRIPTION:Reminder",
+      "TRIGGER:-PT24H",
+      "END:VALARM",
+    ].join("\r\n"));
+  }
+  if (msUntil > 2 * 60 * 60 * 1000) {
+    blocks.push([
+      "BEGIN:VALARM",
+      "ACTION:DISPLAY",
+      "DESCRIPTION:Reminder",
+      "TRIGGER:-PT2H",
+      "END:VALARM",
+    ].join("\r\n"));
+  }
+  return blocks;
+}
+
+async function buildTrackerIcs(items, origin, now = Date.now()) {
+  const events = [];
+  for (const item of items.slice(0, CALENDAR_MAX_EVENTS)) {
+    const event = await buildGoogleCalendarEvent(item, origin);
+    if (!event) continue;
+    const esc = (value) => String(value || "").replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+    const utc = (iso) => new Date(iso).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    const valarms = buildValarmBlocks(event.end.dateTime, now);
+    const lines = [
+      "BEGIN:VEVENT",
+      `UID:${event.id}@prairielearn-tracker`,
+      `DTSTAMP:${utc(new Date(now).toISOString())}`,
+      `DTSTART:${utc(event.start.dateTime)}`,
+      `DTEND:${utc(event.end.dateTime)}`,
+      `SUMMARY:${esc(event.summary)}`,
+      `DESCRIPTION:${esc(event.description)}`,
+      `URL:${event.source.url}`,
+    ];
+    if (valarms.length > 0) {
+      lines.push(...valarms);
+    }
+    lines.push("END:VEVENT");
+    events.push(lines.join("\r\n"));
+  }
+  return ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//PrairieLearn Tracker//EN", "CALSCALE:GREGORIAN", ...events, "END:VCALENDAR", ""].join("\r\n");
+}
+
+if (typeof globalThis !== "undefined") {
+  globalThis.__PL_BACKGROUND_RUNTIME__ = {
+    resolvePrairieLearnAssessmentUrl,
+    isEligibleForCalendarAction,
+    buildGoogleCalendarEvent,
+    getCalendarItems,
+    filterCalendarItemsByScope,
+    buildValarmBlocks,
+    buildTrackerIcs,
+  };
 }

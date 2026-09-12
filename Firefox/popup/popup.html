@@ -15,6 +15,14 @@
         <div class="actions">
           <button id="refreshBtn" type="button" class="primary">Refresh</button>
           <button id="openHomeBtn" type="button" class="secondary">Open Home</button>
+          <button id="calendarBtn" type="button" class="primary">Sync Google Calendar</button>
+          <div class="ics-scope-container">
+            <select id="icsScopeSelect" class="secondary" aria-label="ICS export scope" title="Select ICS export scope">
+              <option value="all">All future deadlines</option>
+              <option value="week">Next 7 days only</option>
+            </select>
+            <button id="icsBtn" type="button" class="secondary">Download .ics</button>
+          </div>
         </div>
       </header>
 

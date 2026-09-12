@@ -1,2 +1,9 @@
 notes.md
 Release Zips/*
+config.js
+Chrome/config.js
+Firefox/config.js
+
+# Saved PrairieLearn pages for parser tests (contain names/scores)
+test/fixtures/
+node_modules/

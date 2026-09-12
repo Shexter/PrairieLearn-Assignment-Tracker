@@ -2,14 +2,18 @@
   "manifest_version": 3,
   "name": "PrairieLearn Tracker",
   "description": "Track upcoming PrairieLearn assessments across enrolled courses.",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "permissions": [
     "storage",
     "tabs",
-    "scripting"
+    "scripting",
+    "identity",
+    "offscreen"
   ],
   "host_permissions": [
     "https://*.prairielearn.com/*"
+    ,"https://accounts.google.com/*"
+    ,"https://www.googleapis.com/*"
   ],
   "content_scripts": [
     {
@@ -18,6 +22,25 @@
       ],
       "js": [
         "home-content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.prairielearn.com/pl/course_instance/*/assessment_instance/*"
+      ],
+      "js": [
+        "assessment-content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.prairielearn.com/pl/course_instance/*/instance_question/*"
+      ],
+      "js": [
+        "libs/html2canvas.min.js",
+        "question-content.js"
       ],
       "run_at": "document_idle"
     }

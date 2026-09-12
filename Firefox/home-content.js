@@ -3,6 +3,8 @@ const HOME_CARD_ID = "pl-tracker-upcoming-card";
 const HOME_CARD_BODY_ID = "pl-tracker-upcoming-body";
 const HOME_CARD_SUBTITLE_ID = "pl-tracker-upcoming-subtitle";
 const HOME_CARD_REFRESH_ID = "pl-tracker-upcoming-refresh";
+const HOME_CARD_CALENDAR_ID = "pl-tracker-upcoming-calendar";
+const HOME_CARD_EXPORT_ID = "pl-tracker-upcoming-export";
 const HOME_CARD_EMPTY_CLASS = "pl-tracker-upcoming-empty";
 const ASSESSMENT_PIN_BUTTON_CLASS = "pl-tracker-pin-btn";
 const PRAIRIE_TEST_HOSTNAME = "us.prairielearn.com";
@@ -19,6 +21,7 @@ if (isPrairieLearnHomePage()) {
 
 if (isAssessmentsPage()) {
   void initAssessmentsPinButtons();
+  void initCourseAssessmentsFilterToolbar();
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -190,6 +193,90 @@ function createHomeUpcomingCard() {
   refreshButton.className = "btn btn-light btn-sm ms-auto";
   refreshButton.textContent = "Refresh";
 
+  const actionGroup = document.createElement("div");
+  actionGroup.className = "d-flex flex-wrap gap-2 ms-auto";
+  refreshButton.classList.remove("ms-auto");
+
+  const calendarButton = document.createElement("button");
+  calendarButton.id = HOME_CARD_CALENDAR_ID;
+  calendarButton.type = "button";
+  calendarButton.className = "btn btn-light btn-sm";
+  calendarButton.textContent = "Sync Google Calendar";
+  calendarButton.title = "Sync all future published deadlines, not only this seven-day list";
+
+  const exportDropdown = document.createElement("div");
+  exportDropdown.className = "dropdown d-inline-block";
+  exportDropdown.style.position = "relative";
+
+  const exportButton = document.createElement("button");
+  exportButton.id = HOME_CARD_EXPORT_ID;
+  exportButton.type = "button";
+  exportButton.className = "btn btn-outline-light btn-sm dropdown-toggle";
+  exportButton.setAttribute("aria-haspopup", "true");
+  exportButton.setAttribute("aria-expanded", "false");
+  exportButton.textContent = "Download .ics";
+  exportButton.title = "Download future published deadlines for calendar import";
+
+  const exportMenu = document.createElement("div");
+  exportMenu.className = "dropdown-menu shadow-sm py-1";
+  exportMenu.style.position = "absolute";
+  exportMenu.style.zIndex = "1050";
+  exportMenu.style.display = "none";
+  exportMenu.style.top = "100%";
+  exportMenu.style.left = "0";
+
+  const allScopeBtn = document.createElement("button");
+  allScopeBtn.type = "button";
+  allScopeBtn.className = "dropdown-item small text-start w-100 border-0 bg-transparent py-1 px-3";
+  allScopeBtn.textContent = "All future deadlines";
+  allScopeBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    exportMenu.style.display = "none";
+    exportButton.setAttribute("aria-expanded", "false");
+    void exportCalendarFile(exportButton, "all");
+  });
+
+  const weekScopeBtn = document.createElement("button");
+  weekScopeBtn.type = "button";
+  weekScopeBtn.className = "dropdown-item small text-start w-100 border-0 bg-transparent py-1 px-3";
+  weekScopeBtn.textContent = "Next 7 days only";
+  weekScopeBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    exportMenu.style.display = "none";
+    exportButton.setAttribute("aria-expanded", "false");
+    void exportCalendarFile(exportButton, "week");
+  });
+
+  exportMenu.appendChild(allScopeBtn);
+  exportMenu.appendChild(weekScopeBtn);
+
+  exportButton.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const isOpen = exportMenu.style.display === "block";
+    exportMenu.style.display = isOpen ? "none" : "block";
+    exportButton.setAttribute("aria-expanded", String(!isOpen));
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!exportDropdown.contains(e.target)) {
+      exportMenu.style.display = "none";
+      exportButton.setAttribute("aria-expanded", "false");
+    }
+  });
+
+  exportDropdown.appendChild(exportButton);
+  exportDropdown.appendChild(exportMenu);
+
+  const status = document.createElement("span");
+  status.id = HOME_CARD_SUBTITLE_ID;
+  status.className = "small ms-2 text-white";
+  status.setAttribute("aria-live", "polite");
+
+  calendarButton.addEventListener("click", () => syncGoogleCalendar(calendarButton, exportButton));
+
   refreshButton.addEventListener("click", async () => {
     refreshButton.disabled = true;
     try {
@@ -201,8 +288,12 @@ function createHomeUpcomingCard() {
     }
   });
 
+  actionGroup.appendChild(calendarButton);
+  actionGroup.appendChild(exportDropdown);
+  actionGroup.appendChild(refreshButton);
   header.appendChild(title);
-  header.appendChild(refreshButton);
+  header.appendChild(actionGroup);
+  header.appendChild(status);
   card.appendChild(header);
 
   const body = document.createElement("div");
@@ -282,6 +373,7 @@ async function initAssessmentsPinButtons() {
   rows.forEach((entry, index) => {
     const initialPinned = Boolean(pinStates[index]?.pinned);
     renderAssessmentPinButton(entry, initialPinned);
+    renderAssessmentCalendarMenu(entry);
   });
 }
 
@@ -317,8 +409,81 @@ function getCourseInstanceIdFromPath(path) {
   return match?.[1] || null;
 }
 
+// Column positions are not fixed across course instances, so resolve them from
+// the table header instead of counting cells. Falls back to the common layout
+// when there is no header row to read.
+const POSITIONAL_ASSESSMENT_COLUMNS = { title: 1, availability: 2, score: 3 };
+
+function resolveAssessmentColumns(node) {
+  const table = getAssessmentsTableFrom(node);
+  const headerRow = table?.querySelector(":scope > thead > tr");
+  const headers = headerRow
+    ? Array.from(headerRow.children).map((cell) => normalizeWhitespace(cell.textContent))
+    : [];
+
+  if (!headers.length) {
+    return { ...POSITIONAL_ASSESSMENT_COLUMNS };
+  }
+
+  const indexOf = (pattern) => {
+    const found = headers.findIndex((text) => pattern.test(text));
+    return found === -1 ? null : found;
+  };
+
+  return {
+    title: indexOf(/^title$/i),
+    availability: indexOf(/available\s*credit/i),
+    score: indexOf(/^score$/i),
+  };
+}
+
+function toAbsoluteAssessmentUrlSafe(href, origin) {
+  if (!href) {
+    return null;
+  }
+  try {
+    return new URL(href, origin).toString();
+  } catch {
+    return null;
+  }
+}
+
+function assessmentCellAt(cells, index) {
+  return typeof index === "number" && index >= 0 && index < cells.length ? cells[index] : null;
+}
+
+// PrairieLearn renders one <tbody> per assessment group, so any scan anchored to
+// a single tbody only ever sees the first group. Always walk the whole table.
+function getAssessmentsTableFrom(node) {
+  if (!node) {
+    return null;
+  }
+  if (typeof node.closest === "function") {
+    return node.closest("table") || (node.tagName === "TABLE" ? node : null);
+  }
+  return null;
+}
+
+function collectAssessmentTableRows(node) {
+  const table = getAssessmentsTableFrom(node);
+  if (!table) {
+    return [];
+  }
+  return Array.from(table.querySelectorAll(":scope > tbody > tr"));
+}
+
+function getLastAssessmentTableBody(node) {
+  const table = getAssessmentsTableFrom(node);
+  if (!table) {
+    return null;
+  }
+  const bodies = table.querySelectorAll(":scope > tbody");
+  return bodies.length ? bodies[bodies.length - 1] : null;
+}
+
 function collectAssessmentsForPinning(tbody, courseInstanceId) {
-  const rows = Array.from(tbody.querySelectorAll(":scope > tr"));
+  const rows = collectAssessmentTableRows(tbody);
+  const columns = resolveAssessmentColumns(tbody);
   const entries = [];
   let currentGroup = null;
 
@@ -331,11 +496,14 @@ function collectAssessmentsForPinning(tbody, courseInstanceId) {
 
     const badgeElement = row.querySelector('[data-testid="assessment-set-badge"]');
     const cells = row.querySelectorAll("td");
-    if (!badgeElement || cells.length < 4) {
+    if (!badgeElement || !cells.length) {
       continue;
     }
 
-    const titleCell = cells[1];
+    const titleCell = assessmentCellAt(cells, columns.title);
+    if (!titleCell) {
+      continue;
+    }
     const linkElement = titleCell.querySelector("a");
     const title = normalizeWhitespace(linkElement?.textContent || titleCell.textContent) || "Untitled";
     const href = linkElement?.getAttribute("href") || null;
@@ -349,17 +517,19 @@ function collectAssessmentsForPinning(tbody, courseInstanceId) {
     }
     const badge = normalizeWhitespace(badgeElement.textContent) || null;
 
-    const availabilityCell = cells[2];
-    const availabilityText = normalizeWhitespace(availabilityCell.textContent) || null;
-    const popoverButton = availabilityCell.querySelector('button[data-bs-toggle="popover"]');
+    const availabilityCell = assessmentCellAt(cells, columns.availability);
+    const availabilityText = normalizeWhitespace(availabilityCell?.textContent) || null;
+    const popoverButton =
+      availabilityCell?.querySelector('button[data-bs-toggle="popover"]') || null;
     const accessWindows = parsePopoverAccessDetails(popoverButton);
-    const dueAt = getEffectiveDueTimestamp(accessWindows, availabilityText);
+    const deadline = getDeadlineInfo(availabilityText, accessWindows);
+    const dueAt = deadline.deadlineAt;
 
-    const scoreText = normalizeWhitespace(cells[3].textContent);
+    const scoreText = normalizeWhitespace(assessmentCellAt(cells, columns.score)?.textContent);
     const isClosed =
       /assessment closed/i.test(availabilityText || "") || /assessment closed/i.test(scoreText || "");
 
-    if (isClosed || isDueInPast(dueAt)) {
+    if (isClosed || !deadline.deadlineAt || isDueInPast(dueAt)) {
       continue;
     }
 
@@ -374,6 +544,8 @@ function collectAssessmentsForPinning(tbody, courseInstanceId) {
         href,
         absoluteUrl,
         dueAt,
+        deadlineAt: deadline.deadlineAt,
+        deadlineSource: deadline.deadlineSource,
       },
     });
   }
@@ -457,6 +629,8 @@ function buildPinToggleAssessmentPayload(item) {
     href: typeof item.href === "string" ? item.href : null,
     absoluteUrl: typeof item.href === "string" ? item.href : null,
     dueAt: typeof item.dueAt === "string" ? item.dueAt : null,
+    deadlineAt: typeof item.deadlineAt === "string" ? item.deadlineAt : null,
+    deadlineSource: typeof item.deadlineSource === "string" ? item.deadlineSource : null,
   };
 }
 
@@ -491,7 +665,7 @@ function renderHomeUpcomingFromDashboard(dashboard) {
     return;
   }
 
-  const filtered = getTwoWeekPendingAssessments(dashboard);
+  const filtered = getSevenDayPendingAssessments(dashboard);
   const pinnedVisibleCount = filtered.filter((item) => item?.isPinned).length;
   const refreshedAt = dashboard?.meta?.lastRefreshAt || null;
   const refreshedLabel = refreshedAt
@@ -577,6 +751,10 @@ function renderHomeUpcomingFromDashboard(dashboard) {
       link.removeAttribute("href");
     }
     assessmentCell.appendChild(link);
+    const calMenu = renderCalendarActionMenu(item, window.location.origin);
+    if (calMenu) {
+      assessmentCell.appendChild(calMenu);
+    }
     row.appendChild(assessmentCell);
 
     const dueCell = document.createElement("td");
@@ -615,6 +793,51 @@ function renderHomeUpcomingError(message) {
   setHomeCardSubtitle("Data unavailable");
 }
 
+async function syncGoogleCalendar(calendarButton, exportButton) {
+  const original = calendarButton.textContent;
+  calendarButton.disabled = true;
+  exportButton.disabled = true;
+  setHomeCardSubtitle("Authorizing Google Calendar and syncing future published deadlines…");
+  try {
+    const response = await sendMessageToBackground({ type: "PL_SYNC_GOOGLE_CALENDAR" });
+    if (!response?.ok) throw new Error(response?.error || "Google Calendar sync failed.");
+    const result = response.result || {};
+    setHomeCardSubtitle(`Calendar sync complete: ${result.created || 0} created, ${result.updated || 0} updated, ${result.unchanged || 0} unchanged${result.failed ? `, ${result.failed} failed` : ""}.`);
+  } catch (error) {
+    setHomeCardSubtitle(`Calendar sync unavailable: ${toErrorMessage(error)} Use Download .ics to import manually.`);
+  } finally {
+    calendarButton.textContent = original;
+    calendarButton.disabled = false;
+    exportButton.disabled = false;
+  }
+}
+
+async function exportCalendarFile(exportButton, scope = "all", options = {}) {
+  exportButton.disabled = true;
+  const scopeLabel = scope === "week" ? "next 7 days" : scope === "course" ? "current course" : "all future";
+  setHomeCardSubtitle(`Preparing ${scopeLabel} calendar file…`);
+  try {
+    const response = await sendMessageToBackground({
+      type: "PL_EXPORT_CALENDAR_ICS",
+      payload: { scope, ...options },
+    });
+    if (!response?.ok || typeof response.ics !== "string") throw new Error(response?.error || "Calendar file export failed.");
+    const blob = new Blob([response.ics], { type: "text/calendar;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = response.filename || "prairielearn-deadlines.ics";
+    link.click();
+    URL.revokeObjectURL(url);
+    const countMsg = response.count ? ` (${response.count} deadline${response.count === 1 ? "" : "s"})` : "";
+    setHomeCardSubtitle(`Calendar file downloaded${countMsg}. Import it into your calendar.`);
+  } catch (error) {
+    setHomeCardSubtitle(`Calendar file export failed: ${toErrorMessage(error)}`);
+  } finally {
+    exportButton.disabled = false;
+  }
+}
+
 function setHomeCardSubtitle(text) {
   const subtitle = document.getElementById(HOME_CARD_SUBTITLE_ID);
   if (subtitle) {
@@ -622,15 +845,16 @@ function setHomeCardSubtitle(text) {
   }
 }
 
-function getTwoWeekPendingAssessments(dashboard) {
+function getSevenDayPendingAssessments(dashboard) {
   const upcoming = Array.isArray(dashboard?.upcoming) ? dashboard.upcoming : [];
   const now = Date.now();
-  const twoWeeksMs = 14 * 24 * 60 * 60 * 1000;
-  const maxDue = now + twoWeeksMs;
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+  const maxDue = now + sevenDaysMs;
 
   return upcoming
     .filter((item) => {
-      const dueTime = Date.parse(item?.dueAt || "");
+      if (!item?.deadlineAt || !item?.deadlineSource) return false;
+      const dueTime = Date.parse(item?.deadlineAt || item?.dueAt || "");
       const hasDue = !Number.isNaN(dueTime);
 
       if (item?.isPinned) {
@@ -642,7 +866,7 @@ function getTwoWeekPendingAssessments(dashboard) {
         return false;
       }
 
-      if (!hasDue || dueTime < now || dueTime > maxDue) {
+      if (!hasDue || dueTime <= now || dueTime > maxDue) {
         return false;
       }
 
@@ -653,8 +877,8 @@ function getTwoWeekPendingAssessments(dashboard) {
         return a?.isPinned ? -1 : 1;
       }
 
-      const aDue = Date.parse(a?.dueAt || "");
-      const bDue = Date.parse(b?.dueAt || "");
+      const aDue = Date.parse(a?.deadlineAt || a?.dueAt || "");
+      const bDue = Date.parse(b?.deadlineAt || b?.dueAt || "");
       const aHasDue = !Number.isNaN(aDue);
       const bHasDue = !Number.isNaN(bDue);
 
@@ -880,8 +1104,8 @@ async function fetchAndParseAssessments(origin, courseInstanceId) {
 }
 
 function parseAssessmentsDocument(doc, context) {
-  const tbody = doc.querySelector('table[aria-label="Assessments"] tbody');
-  if (!tbody) {
+  const table = doc.querySelector('table[aria-label="Assessments"]');
+  if (!table) {
     return null;
   }
 
@@ -890,9 +1114,10 @@ function parseAssessmentsDocument(doc, context) {
     normalizeWhitespace(doc.querySelector("#main-nav .navbar-text")?.textContent) || null;
 
   const assessments = [];
+  const columns = resolveAssessmentColumns(table);
   let currentGroup = null;
 
-  const rows = Array.from(tbody.querySelectorAll(":scope > tr"));
+  const rows = Array.from(table.querySelectorAll(":scope > tbody > tr"));
   for (const row of rows) {
     const groupHeading = row.querySelector('[data-testid="assessment-group-heading"]');
     if (groupHeading) {
@@ -902,25 +1127,27 @@ function parseAssessmentsDocument(doc, context) {
 
     const badgeElement = row.querySelector('[data-testid="assessment-set-badge"]');
     const cells = row.querySelectorAll("td");
-    if (!badgeElement || cells.length < 4) {
+    if (!badgeElement || !cells.length) {
       continue;
     }
 
     const badge = normalizeWhitespace(badgeElement.textContent);
-    const titleCell = cells[1];
-    const linkElement = titleCell.querySelector("a");
-    const title = normalizeWhitespace(linkElement?.textContent || titleCell.textContent) || "Untitled";
+    const titleCell = assessmentCellAt(cells, columns.title);
+    const linkElement = titleCell?.querySelector("a") || null;
+    const title =
+      normalizeWhitespace(linkElement?.textContent || titleCell?.textContent) || "Untitled";
     const href = linkElement?.getAttribute("href") || null;
-    const absoluteUrl = href ? new URL(href, context.origin).toString() : null;
+    const absoluteUrl = toAbsoluteAssessmentUrlSafe(href, context.origin);
 
-    const availabilityCell = cells[2];
-    const availabilityText = normalizeWhitespace(availabilityCell.textContent) || null;
-    const popoverButton = availabilityCell.querySelector('button[data-bs-toggle="popover"]');
+    const availabilityCell = assessmentCellAt(cells, columns.availability);
+    const availabilityText = normalizeWhitespace(availabilityCell?.textContent) || null;
+    const popoverButton =
+      availabilityCell?.querySelector('button[data-bs-toggle="popover"]') || null;
     const accessWindows = parsePopoverAccessDetails(popoverButton);
 
-    const scoreCell = cells[3];
-    const score = extractScorePercentFromCell(scoreCell);
-    const scoreText = normalizeWhitespace(scoreCell.textContent);
+    const scoreCell = assessmentCellAt(cells, columns.score);
+    const score = scoreCell ? extractScorePercentFromCell(scoreCell) : null;
+    const scoreText = normalizeWhitespace(scoreCell?.textContent);
 
     let status = "unknown";
     if (score) {
@@ -929,13 +1156,13 @@ function parseAssessmentsDocument(doc, context) {
       status = "closed";
     } else if (/not started/i.test(scoreText)) {
       status = "not_started";
-    } else if (scoreCell.querySelector("a.btn, button.btn")) {
+    } else if (scoreCell?.querySelector("a.btn, button.btn")) {
       status = "action_available";
     } else if (scoreText) {
       status = "text_status";
     }
 
-    const dueAt = getEffectiveDueTimestamp(accessWindows, availabilityText);
+    const deadline = getDeadlineInfo(availabilityText, accessWindows);
 
     assessments.push({
       courseInstanceId: context.courseInstanceId,
@@ -947,7 +1174,9 @@ function parseAssessmentsDocument(doc, context) {
       absoluteUrl,
       availabilityText,
       accessWindows,
-      dueAt,
+      dueAt: deadline.deadlineAt,
+      deadlineAt: deadline.deadlineAt,
+      deadlineSource: deadline.deadlineSource,
       score: score || null,
       scoreText: scoreText || null,
       status,
@@ -975,12 +1204,19 @@ function parsePopoverAccessDetails(buttonElement) {
     return [];
   }
 
-  const decodedHtml = decodeHtmlEntities(raw);
-  if (!decodedHtml) {
-    return [];
+  // getAttribute() already returns the decoded attribute value, so `raw` is
+  // real HTML. Running it through decodeHtmlEntities() flattened it to plain
+  // text and left zero <tr> elements to read. Parse it directly, and only fall
+  // back to decoding for a doubly-escaped payload.
+  let popoverDoc = new DOMParser().parseFromString(raw, "text/html");
+  if (!popoverDoc.querySelector("tr")) {
+    const decodedHtml = decodeHtmlEntities(raw);
+    if (!decodedHtml) {
+      return [];
+    }
+    popoverDoc = new DOMParser().parseFromString(decodedHtml, "text/html");
   }
 
-  const popoverDoc = new DOMParser().parseFromString(decodedHtml, "text/html");
   const rows = Array.from(popoverDoc.querySelectorAll("tr")).slice(1);
   if (!rows.length) {
     return [];
@@ -1083,6 +1319,8 @@ function normalizeNumericPercentString(raw) {
 }
 
 function getEffectiveDueTimestamp(accessWindows, availabilityText) {
+  const visibleDeadline = parseVisibleUntil(availabilityText);
+  if (visibleDeadline) return visibleDeadline;
   const windows = Array.isArray(accessWindows) ? accessWindows : [];
   const validEnds = windows
     .map((window) => window?.endIso)
@@ -1094,6 +1332,35 @@ function getEffectiveDueTimestamp(accessWindows, availabilityText) {
   }
 
   return parseAvailabilityFallback(availabilityText);
+}
+
+function getDeadlineInfo(availabilityText, accessWindows) {
+  const visibleDeadline = parseVisibleUntil(availabilityText);
+  if (visibleDeadline) return { deadlineAt: visibleDeadline, deadlineSource: "visible_until" };
+  const windows = Array.isArray(accessWindows) ? accessWindows : [];
+  const ends = windows.map((entry) => entry?.endIso).filter((iso) => iso && !Number.isNaN(Date.parse(iso)));
+  if (ends.length) {
+    ends.sort((a, b) => Date.parse(a) - Date.parse(b));
+    return { deadlineAt: new Date(Date.parse(ends[ends.length - 1])).toISOString(), deadlineSource: "access_window_end" };
+  }
+  return { deadlineAt: null, deadlineSource: null };
+}
+
+function parseVisibleUntil(text) {
+  if (typeof text !== "string") return null;
+  const match = text.match(/\buntil\s+(\d{1,2}):(\d{2}),\s*\w{3},\s*([A-Za-z]{3})\s+(\d{1,2})(?:,\s*(\d{4}))?/i);
+  if (!match) return null;
+  const months = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  const month = months[match[3].toLowerCase()];
+  const day = Number(match[4]);
+  if (month === undefined || hour > 23 || minute > 59 || day < 1 || day > 31) return null;
+  const now = new Date();
+  const year = match[5] ? Number(match[5]) : now.getFullYear();
+  let candidate = new Date(year, month, day, hour, minute, 0);
+  if (!match[5] && candidate.getTime() < now.getTime() - 120 * 24 * 60 * 60 * 1000) candidate = new Date(year + 1, month, day, hour, minute, 0);
+  return Number.isNaN(candidate.getTime()) ? null : candidate.toISOString();
 }
 
 function parsePrairieLearnTimestamp(raw) {
@@ -1286,4 +1553,778 @@ async function mapWithConcurrency(items, concurrency, worker) {
 
   await Promise.all(runners);
   return results;
+}
+
+function formatUtcCompact(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function resolvePrairieLearnAssessmentUrl(rawUrl, origin = (typeof window !== "undefined" && window?.location?.origin) || "https://us.prairielearn.com") {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) return null;
+  const trimmed = rawUrl.trim();
+  if (/^(?:javascript|data|vbscript|file):/i.test(trimmed)) {
+    return null;
+  }
+  let base = typeof origin === "string" && origin.trim() ? origin.trim() : "https://us.prairielearn.com";
+  if (!/^https?:\/\//i.test(base)) {
+    base = `https://${base}`;
+  }
+  let baseUrl;
+  try {
+    baseUrl = new URL(base);
+  } catch {
+    return null;
+  }
+  const baseHost = baseUrl.hostname.toLowerCase();
+  if (baseHost !== "prairielearn.com" && !baseHost.endsWith(".prairielearn.com")) {
+    return null;
+  }
+
+  try {
+    const resolved = new URL(trimmed, baseUrl);
+    if (resolved.protocol !== "https:" && resolved.protocol !== "http:") {
+      return null;
+    }
+    const resolvedHost = resolved.hostname.toLowerCase();
+    if (resolvedHost !== "prairielearn.com" && !resolvedHost.endsWith(".prairielearn.com")) {
+      return null;
+    }
+    if (resolved.origin.toLowerCase() !== baseUrl.origin.toLowerCase()) {
+      return null;
+    }
+    return resolved.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isEligibleForCalendarAction(item, origin = (typeof window !== "undefined" && window?.location?.origin) || "https://us.prairielearn.com", now = Date.now()) {
+  let targetOrigin = origin;
+  let targetNow = now;
+  if (typeof origin === "number") {
+    targetNow = origin;
+    targetOrigin = typeof now === "string" ? now : ((typeof window !== "undefined" && window?.location?.origin) || "https://us.prairielearn.com");
+  }
+  if (!item || typeof item !== "object") return false;
+  const deadline = item.deadlineAt || (item.deadlineSource ? item.dueAt : null);
+  if (!deadline) return false;
+  const isClosed =
+    item.status === "closed" ||
+    /assessment closed/i.test(item.availabilityText || "") ||
+    /assessment closed/i.test(item.scoreText || "");
+  if (isClosed) return false;
+  const href = item.href || item.absoluteUrl;
+  const resolvedUrl = resolvePrairieLearnAssessmentUrl(href, targetOrigin);
+  if (!resolvedUrl) return false;
+  const due = Date.parse(deadline);
+  return !Number.isNaN(due) && due > targetNow;
+}
+
+function buildGoogleCalendarComposeUrl(item, origin = (typeof window !== "undefined" && window?.location?.origin) || "https://us.prairielearn.com", now = Date.now()) {
+  if (!isEligibleForCalendarAction(item, origin, now)) return null;
+  const resolvedUrl = resolvePrairieLearnAssessmentUrl(item?.href || item?.absoluteUrl, origin);
+  if (!resolvedUrl) return null;
+  const deadline = item.deadlineAt || (item.deadlineSource ? item.dueAt : null);
+  const end = new Date(deadline);
+  const start = new Date(end.getTime() - 15 * 60 * 1000);
+  const startUtc = formatUtcCompact(start);
+  const endUtc = formatUtcCompact(end);
+  if (!startUtc || !endUtc) return null;
+  const course = item.courseLabel || "PrairieLearn";
+  const badge = item.badge ? ` · ${item.badge}` : "";
+  const title = `Due: ${course}${badge} · ${item.title || "Assessment"}`;
+  const details = `PrairieLearn assessment deadline.\n${resolvedUrl}`;
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: title,
+    dates: `${startUtc}/${endUtc}`,
+    details: details,
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+function buildOutlookWebComposeUrl(item, origin = (typeof window !== "undefined" && window?.location?.origin) || "https://us.prairielearn.com", now = Date.now()) {
+  if (!isEligibleForCalendarAction(item, origin, now)) return null;
+  const resolvedUrl = resolvePrairieLearnAssessmentUrl(item?.href || item?.absoluteUrl, origin);
+  if (!resolvedUrl) return null;
+  const deadline = item.deadlineAt || (item.deadlineSource ? item.dueAt : null);
+  const end = new Date(deadline);
+  const start = new Date(end.getTime() - 15 * 60 * 1000);
+  const course = item.courseLabel || "PrairieLearn";
+  const badge = item.badge ? ` · ${item.badge}` : "";
+  const title = `Due: ${course}${badge} · ${item.title || "Assessment"}`;
+  const details = `PrairieLearn assessment deadline.\n${resolvedUrl}`;
+  const params = new URLSearchParams({
+    path: "/calendar/action/compose",
+    rru: "addevent",
+    subject: title,
+    startdt: start.toISOString(),
+    enddt: end.toISOString(),
+    body: details,
+  });
+  return `https://outlook.live.com/calendar/0/deeplink/compose?${params.toString()}`;
+}
+
+async function exportSingleAssessmentIcs(item, origin = (typeof window !== "undefined" && window?.location?.origin) || "https://us.prairielearn.com") {
+  if (!isEligibleForCalendarAction(item, origin)) {
+    return;
+  }
+  try {
+    const response = await sendMessageToBackground({
+      type: "PL_EXPORT_CALENDAR_ICS",
+      payload: { singleAssessment: item },
+    });
+    if (!response?.ok || typeof response.ics !== "string") {
+      throw new Error(response?.error || "Export failed.");
+    }
+    const blob = new Blob([response.ics], { type: "text/calendar;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = response.filename || "prairielearn-deadline.ics";
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.warn("[PL Tracker] Single assessment ICS download failed:", toErrorMessage(err));
+  }
+}
+
+function renderCalendarActionMenu(item, origin = (typeof window !== "undefined" && window?.location?.origin) || "https://us.prairielearn.com") {
+  if (!isEligibleForCalendarAction(item, origin)) {
+    return null;
+  }
+
+  const container = document.createElement("div");
+  container.className = "btn-group btn-group-sm ms-2 pl-cal-menu-container d-inline-block";
+  container.style.position = "relative";
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "btn btn-xs btn-outline-secondary pl-cal-menu-toggle";
+  toggle.setAttribute("aria-haspopup", "true");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.setAttribute("aria-label", `Add ${item.title || "assessment"} to calendar`);
+  toggle.title = "Add to calendar";
+  toggle.textContent = "📅";
+
+  const menu = document.createElement("div");
+  menu.className = "dropdown-menu shadow-sm py-1 pl-cal-dropdown-menu";
+  menu.style.position = "absolute";
+  menu.style.zIndex = "1050";
+  menu.style.minWidth = "170px";
+  menu.style.display = "none";
+  menu.style.top = "100%";
+  menu.style.left = "0";
+
+  const googleItem = document.createElement("button");
+  googleItem.type = "button";
+  googleItem.className = "dropdown-item small text-start w-100 border-0 bg-transparent py-1 px-3";
+  googleItem.textContent = "Google Calendar";
+  googleItem.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeMenu();
+    const url = buildGoogleCalendarComposeUrl(item, origin);
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
+  });
+
+  const outlookItem = document.createElement("button");
+  outlookItem.type = "button";
+  outlookItem.className = "dropdown-item small text-start w-100 border-0 bg-transparent py-1 px-3";
+  outlookItem.textContent = "Outlook Web";
+  outlookItem.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeMenu();
+    const url = buildOutlookWebComposeUrl(item, origin);
+    if (url) window.open(url, "_blank", "noopener,noreferrer");
+  });
+
+  const icsItem = document.createElement("button");
+  icsItem.type = "button";
+  icsItem.className = "dropdown-item small text-start w-100 border-0 bg-transparent py-1 px-3";
+  icsItem.textContent = "Apple / iCal (.ics)";
+  icsItem.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeMenu();
+    await exportSingleAssessmentIcs(item, origin);
+  });
+
+  menu.appendChild(googleItem);
+  menu.appendChild(outlookItem);
+  menu.appendChild(icsItem);
+
+  function openMenu() {
+    menu.style.display = "block";
+    toggle.setAttribute("aria-expanded", "true");
+    googleItem.focus();
+  }
+
+  function closeMenu() {
+    menu.style.display = "none";
+    toggle.setAttribute("aria-expanded", "false");
+  }
+
+  toggle.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const isOpen = menu.style.display === "block";
+    if (isOpen) {
+      closeMenu();
+    } else {
+      openMenu();
+    }
+  });
+
+  container.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeMenu();
+      toggle.focus();
+    }
+  });
+
+  document.addEventListener("click", (e) => {
+    if (!container.contains(e.target)) {
+      closeMenu();
+    }
+  });
+
+  container.appendChild(toggle);
+  container.appendChild(menu);
+  return container;
+}
+
+function renderAssessmentCalendarMenu(entry) {
+  if (!entry?.titleCell || !entry.assessment) return;
+  const origin = (typeof window !== "undefined" && window?.location?.origin) || "https://us.prairielearn.com";
+  if (!isEligibleForCalendarAction(entry.assessment, origin)) return;
+  if (entry.titleCell.querySelector(".pl-cal-menu-container")) return;
+  const menu = renderCalendarActionMenu(entry.assessment, origin);
+  if (menu) {
+    entry.titleCell.appendChild(menu);
+  }
+}
+
+function isAssessment100PercentCompleted(score) {
+  const percent = parseScorePercent(score);
+  return percent !== null && percent >= 100;
+}
+
+function isAssessmentActiveOrDueSoon(item, now = Date.now(), horizonDays = 7) {
+  if (!item || typeof item !== "object") return true;
+  const status = String(item.status || "").toLowerCase();
+  const avail = String(item.availabilityText || "");
+  const score = String(item.scoreText || item.score || "");
+  if (status === "closed" || /assessment closed/i.test(avail) || /assessment closed/i.test(score)) {
+    return false;
+  }
+  const deadline = item.deadlineAt || (item.deadlineSource ? item.dueAt : null);
+  if (deadline) {
+    const due = Date.parse(deadline);
+    if (Number.isNaN(due)) return true;
+    if (due <= now) return false;
+    return due <= now + horizonDays * 24 * 60 * 60 * 1000;
+  }
+  if (/^Available\b/i.test(avail)) {
+    return false;
+  }
+  return true;
+}
+
+function matchesAssessmentSearch(item, query) {
+  const q = normalizeWhitespace(query).toLowerCase();
+  if (!q) return true;
+  const parts = [
+    item?.title,
+    item?.badge,
+    item?.group,
+    item?.searchableText,
+    item?.availabilityText,
+  ].filter(Boolean).map((s) => String(s).toLowerCase());
+  return parts.some((p) => p.includes(q));
+}
+
+function filterAssessmentItem(item, filters = {}, context = {}) {
+  if (!item || typeof item !== "object") return true;
+  const now = context.now || Date.now();
+  const horizonDays = context.horizonDays || 7;
+
+  if (filters.hideCompleted && isAssessment100PercentCompleted(item.score || item.scoreText)) {
+    return false;
+  }
+  if (filters.onlyActiveDueSoon && !isAssessmentActiveOrDueSoon(item, now, horizonDays)) {
+    return false;
+  }
+  if (filters.query && !matchesAssessmentSearch(item, filters.query)) {
+    return false;
+  }
+  return true;
+}
+
+function getProgressSummaryEngine() {
+  if (typeof PrairieLearnProgressSummary !== "undefined") {
+    return PrairieLearnProgressSummary;
+  }
+  if (typeof globalThis !== "undefined" && globalThis.PrairieLearnProgressSummary) {
+    return globalThis.PrairieLearnProgressSummary;
+  }
+  if (typeof window !== "undefined" && window.PrairieLearnProgressSummary) {
+    return window.PrairieLearnProgressSummary;
+  }
+  if (typeof require === "function") {
+    try {
+      const mod = require("../shared/progress-summary.js");
+      return (typeof globalThis !== "undefined" && globalThis.PrairieLearnProgressSummary) || mod;
+    } catch {}
+  }
+  return null;
+}
+
+function formatSummaryHeadline(summary) {
+  if (!summary || typeof summary !== "object") return "No progress figure can be derived";
+  if (summary.hasPoints) {
+    return summary.percentage !== null
+      ? `${summary.securedPoints} / ${summary.availablePoints} pts (${summary.percentage}%)`
+      : `${summary.securedPoints} / ${summary.availablePoints} pts`;
+  }
+  if (typeof summary.meanPercentage === "number" && Number.isFinite(summary.meanPercentage)) {
+    return `${summary.meanPercentage}%`;
+  }
+  return "No progress figure can be derived";
+}
+
+function renderCourseProgressSummaryCard(summaryOrItems, cardElement, options = {}) {
+  const card = cardElement || (typeof document !== "undefined" && document.getElementById("pl-course-progress-summary-card"));
+  if (!card) return null;
+
+  let summary = summaryOrItems;
+  if (Array.isArray(summaryOrItems)) {
+    const engine = getProgressSummaryEngine();
+    if (engine && typeof engine.aggregateProgress === "function") {
+      summary = engine.aggregateProgress(summaryOrItems, options);
+    } else {
+      summary = null;
+    }
+  }
+
+  if (!summary) {
+    card.style.display = "none";
+    return card;
+  }
+
+  card.style.display = "";
+  const now =
+    options.now instanceof Date
+      ? options.now
+      : typeof options.now === "number"
+      ? new Date(options.now)
+      : new Date();
+  const freshnessLabel = options.freshnessLabel || `Computed ${now.toLocaleTimeString()}`;
+
+  let headlineHtml = "";
+  let countsHtml = "";
+  let disclaimerHtml = "";
+  let bonusHtml = "";
+
+  if (summary.hasPoints) {
+    const pct = summary.percentage !== null ? ` <span class="text-muted fw-normal fs-5">(${summary.percentage}%)</span>` : "";
+    headlineHtml = `<span id="pl-progress-headline" class="fs-4 fw-bold text-dark">${summary.securedPoints} / ${summary.availablePoints} pts</span>${pct}`;
+    countsHtml = `<span id="pl-progress-counts"><strong>${summary.counts?.includedRows ?? 0}</strong> assessment${summary.counts?.includedRows === 1 ? "" : "s"} included, <strong>${summary.counts?.excludedRows ?? 0}</strong> excluded</span>`;
+    disclaimerHtml = `<div class="text-muted small mt-2 pt-2 border-top fst-italic" id="pl-progress-disclaimer">Assessment-list summary only. Not an official course grade.</div>`;
+  } else if (typeof summary.meanPercentage === "number" && Number.isFinite(summary.meanPercentage)) {
+    headlineHtml = `<span id="pl-progress-headline" class="fs-4 fw-bold text-dark">${summary.meanPercentage}%</span> <span class="badge bg-secondary ms-2 align-middle" id="pl-progress-mean-badge">Unweighted mean</span>`;
+    const unattemptedText = summary.counts?.unattemptedRows > 0 ? `, including ${summary.counts.unattemptedRows} unattempted` : "";
+    countsHtml = `<span id="pl-progress-counts">Averaged <strong>${summary.counts?.meanIncludedRows ?? 0}</strong> visible assessment${summary.counts?.meanIncludedRows === 1 ? "" : "s"} (<strong>${summary.counts?.meanExcludedRows ?? 0}</strong> excluded${unattemptedText})</span>`;
+    disclaimerHtml = `<div class="text-muted small mt-2 pt-2 border-top fst-italic" id="pl-progress-disclaimer">Assessment-list summary only. Not an official course grade. This figure is an unweighted mean of visible percentages; unattempted and unavailable assessments are excluded.</div>`;
+  } else {
+    headlineHtml = `<span id="pl-progress-headline" class="fs-5 fw-semibold text-muted">No progress figure can be derived</span>`;
+    countsHtml = `<span id="pl-progress-counts">All <strong>${summary.counts?.totalRows || summary.counts?.excludedRows || 0}</strong> assessments excluded (no visible scores or points)</span>`;
+    disclaimerHtml = `<div class="text-muted small mt-2 pt-2 border-top fst-italic" id="pl-progress-disclaimer">Assessment-list summary only. Not an official course grade. No visible assessment exposes measurable points or percentages.</div>`;
+  }
+
+  if (summary.bonusPoints > 0 || summary.bonusExplanation) {
+    const explanation = summary.bonusExplanation || `Includes ${summary.bonusPoints} bonus point${summary.bonusPoints === 1 ? "" : "s"} above maximum.`;
+    bonusHtml = `<div class="text-success small mt-1 fw-semibold" id="pl-progress-bonus">⭐ ${explanation}</div>`;
+  }
+
+  card.innerHTML = `
+    <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-1">
+      <div class="d-flex align-items-center gap-2">
+        <span class="text-uppercase text-muted small fw-bold" style="letter-spacing: 0.5px;">Course Progress Summary</span>
+      </div>
+      <div class="text-muted small" id="pl-progress-freshness" title="${now.toISOString()}">${freshnessLabel}</div>
+    </div>
+    <div class="d-flex flex-wrap align-items-baseline gap-2 mt-1">
+      ${headlineHtml}
+    </div>
+    <div class="text-muted small mt-1">
+      ${countsHtml}
+    </div>
+    ${bonusHtml}
+    ${disclaimerHtml}
+  `;
+
+  return card;
+}
+
+async function initCourseAssessmentsFilterToolbar() {
+  const tbody = await waitForAssessmentsTableBody(10000);
+  if (!tbody) return;
+
+  const courseInstanceId = getCourseInstanceIdFromPath(window.location.pathname);
+  if (!courseInstanceId) return;
+
+  const table = tbody.closest("table") || tbody.parentElement;
+  if (!table) return;
+
+  if (document.getElementById("pl-assessment-filter-toolbar")) return;
+
+  const targetContainer =
+    table.parentElement && table.parentElement.classList.contains("table-responsive")
+      ? table.parentElement
+      : table;
+
+  let summaryCard = document.getElementById("pl-course-progress-summary-card");
+  if (!summaryCard) {
+    summaryCard = document.createElement("div");
+    summaryCard.id = "pl-course-progress-summary-card";
+    summaryCard.className = "card mb-3 p-3 bg-light border shadow-sm";
+    if (targetContainer.parentElement) {
+      targetContainer.parentElement.insertBefore(summaryCard, targetContainer);
+    }
+  }
+
+  const toolbar = document.createElement("div");
+  toolbar.id = "pl-assessment-filter-toolbar";
+  toolbar.className = "card mb-3 p-3 bg-light border";
+  toolbar.innerHTML = `
+    <div class="row g-2 align-items-center">
+      <div class="col-12 col-md-5">
+        <div class="input-group input-group-sm">
+          <span class="input-group-text" id="pl-filter-search-label">🔍</span>
+          <input type="search" class="form-control" id="pl-filter-search" placeholder="Search assessments..." aria-label="Search assessments" aria-describedby="pl-filter-search-label">
+        </div>
+      </div>
+      <div class="col-auto">
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="pl-filter-hide-completed">
+          <label class="form-check-label small" for="pl-filter-hide-completed">Hide 100% Completed</label>
+        </div>
+      </div>
+      <div class="col-auto">
+        <div class="form-check form-switch mb-0">
+          <input class="form-check-input" type="checkbox" id="pl-filter-due-soon">
+          <label class="form-check-label small" for="pl-filter-due-soon">Only Active / Due Soon</label>
+        </div>
+      </div>
+      <div class="col-auto ms-auto d-flex align-items-center gap-2">
+        <span id="pl-filter-count" class="text-muted small" aria-live="polite"></span>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="pl-filter-reset">Reset</button>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="pl-filter-export-course-ics" title="Export this course's upcoming deadlines">Download Course .ics</button>
+      </div>
+    </div>
+  `;
+
+  if (targetContainer.parentElement) {
+    targetContainer.parentElement.insertBefore(toolbar, targetContainer);
+  }
+
+  const searchInput = toolbar.querySelector("#pl-filter-search");
+  const hideCompletedCheckbox = toolbar.querySelector("#pl-filter-hide-completed");
+  const dueSoonCheckbox = toolbar.querySelector("#pl-filter-due-soon");
+  const countSpan = toolbar.querySelector("#pl-filter-count");
+  const resetBtn = toolbar.querySelector("#pl-filter-reset");
+  const exportCourseBtn = toolbar.querySelector("#pl-filter-export-course-ics");
+
+  const storageKey = `pl_filter_pref_${window.location.origin}_${courseInstanceId}`;
+
+  function parseRows() {
+    const trs = collectAssessmentTableRows(tbody);
+    const columns = resolveAssessmentColumns(tbody);
+    const groups = [];
+    let currentGroup = { headingRow: null, heading: null, items: [] };
+
+    for (const tr of trs) {
+      if (tr.id === "pl-filter-zero-row") continue;
+      const groupHeading = tr.querySelector('[data-testid="assessment-group-heading"]');
+      if (groupHeading) {
+        currentGroup = {
+          headingRow: tr,
+          heading: normalizeWhitespace(groupHeading.textContent),
+          items: [],
+        };
+        groups.push(currentGroup);
+        continue;
+      }
+
+      const cells = tr.querySelectorAll("td");
+      if (!cells.length) {
+        currentGroup.items.push({
+          row: tr,
+          item: { isUnknown: true, searchableText: normalizeWhitespace(tr.textContent) },
+        });
+        continue;
+      }
+
+      const badgeElement = tr.querySelector('[data-testid="assessment-set-badge"]');
+      const titleCell = assessmentCellAt(cells, columns.title);
+      const linkElement = titleCell ? titleCell.querySelector("a") : null;
+      const title = normalizeWhitespace(linkElement?.textContent || titleCell?.textContent) || "Untitled";
+      const href = linkElement?.getAttribute("href") || null;
+      const badge = normalizeWhitespace(badgeElement?.textContent) || null;
+      const availabilityCell = assessmentCellAt(cells, columns.availability);
+      const availabilityText = normalizeWhitespace(availabilityCell?.textContent) || null;
+      const popoverButton = availabilityCell ? availabilityCell.querySelector('button[data-bs-toggle="popover"]') : null;
+      const accessWindows = parsePopoverAccessDetails(popoverButton);
+      const deadline = getDeadlineInfo(availabilityText, accessWindows);
+      const scoreText = normalizeWhitespace(assessmentCellAt(cells, columns.score)?.textContent);
+      const isClosed =
+        /assessment closed/i.test(availabilityText || "") || /assessment closed/i.test(scoreText || "");
+
+      currentGroup.items.push({
+        row: tr,
+        item: {
+          courseInstanceId,
+          group: currentGroup.heading,
+          badge,
+          title,
+          href,
+          availabilityText,
+          accessWindows,
+          score: scoreText,
+          scoreText,
+          dueAt: deadline.deadlineAt,
+          deadlineAt: deadline.deadlineAt,
+          deadlineSource: deadline.deadlineSource,
+          status: isClosed ? "closed" : "open",
+          searchableText: normalizeWhitespace(tr.textContent),
+        },
+      });
+    }
+
+    if (groups.length === 0 && currentGroup.items.length > 0) {
+      groups.push(currentGroup);
+    }
+    return groups;
+  }
+
+  function applyFilters() {
+    const query = searchInput ? searchInput.value : "";
+    const hideCompleted = hideCompletedCheckbox ? hideCompletedCheckbox.checked : false;
+    const onlyActiveDueSoon = dueSoonCheckbox ? dueSoonCheckbox.checked : false;
+    const groups = parseRows();
+
+    let totalAssessments = 0;
+    let visibleAssessments = 0;
+
+    for (const group of groups) {
+      let groupVisibleCount = 0;
+      for (const entry of group.items) {
+        totalAssessments += 1;
+        let isVisible = true;
+        if (entry.item.isUnknown) {
+          isVisible = true;
+        } else {
+          isVisible = filterAssessmentItem(entry.item, { query, hideCompleted, onlyActiveDueSoon });
+        }
+
+        if (isVisible) {
+          groupVisibleCount += 1;
+          visibleAssessments += 1;
+          entry.row.hidden = false;
+          entry.row.removeAttribute("aria-hidden");
+        } else {
+          entry.row.hidden = true;
+          entry.row.setAttribute("aria-hidden", "true");
+        }
+      }
+
+      if (group.headingRow) {
+        if (groupVisibleCount === 0 && group.items.length > 0) {
+          group.headingRow.hidden = true;
+          group.headingRow.setAttribute("aria-hidden", "true");
+        } else {
+          group.headingRow.hidden = false;
+          group.headingRow.removeAttribute("aria-hidden");
+        }
+      }
+    }
+
+    if (countSpan) {
+      countSpan.textContent = `Showing ${visibleAssessments} of ${totalAssessments} assessments`;
+    }
+
+    let zeroRow = document.getElementById("pl-filter-zero-row");
+    if (visibleAssessments === 0 && totalAssessments > 0) {
+      if (!zeroRow) {
+        zeroRow = document.createElement("tr");
+        zeroRow.id = "pl-filter-zero-row";
+        zeroRow.className = "text-center py-4";
+        const td = document.createElement("td");
+        td.colSpan = 100;
+        td.className = "text-muted p-4";
+        td.innerHTML =
+          'No assessments match the selected filters. <button type="button" class="btn btn-link btn-sm p-0 ms-2" id="pl-filter-inline-reset">Reset filters</button>';
+        zeroRow.appendChild(td);
+        (getLastAssessmentTableBody(tbody) || tbody).appendChild(zeroRow);
+        const inlineReset = zeroRow.querySelector("#pl-filter-inline-reset");
+        if (inlineReset) {
+          inlineReset.addEventListener("click", () => {
+            resetFilters();
+          });
+        }
+      }
+      zeroRow.hidden = false;
+    } else if (zeroRow) {
+      zeroRow.hidden = true;
+    }
+  }
+
+  function saveFilterPreferences() {
+    if (!chrome?.storage?.local) return;
+    chrome.storage.local.set({
+      [storageKey]: {
+        hideCompleted: hideCompletedCheckbox?.checked || false,
+        onlyActiveDueSoon: dueSoonCheckbox?.checked || false,
+      },
+    });
+  }
+
+  function resetFilters() {
+    if (searchInput) searchInput.value = "";
+    if (hideCompletedCheckbox) hideCompletedCheckbox.checked = false;
+    if (dueSoonCheckbox) dueSoonCheckbox.checked = false;
+    applyFilters();
+    saveFilterPreferences();
+  }
+
+  if (searchInput) {
+    searchInput.addEventListener("input", applyFilters);
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        searchInput.value = "";
+        applyFilters();
+      }
+    });
+  }
+
+  if (hideCompletedCheckbox) {
+    hideCompletedCheckbox.addEventListener("change", () => {
+      applyFilters();
+      saveFilterPreferences();
+    });
+  }
+
+  if (dueSoonCheckbox) {
+    dueSoonCheckbox.addEventListener("change", () => {
+      applyFilters();
+      saveFilterPreferences();
+    });
+  }
+
+  if (resetBtn) {
+    resetBtn.addEventListener("click", resetFilters);
+  }
+
+  if (exportCourseBtn) {
+    exportCourseBtn.addEventListener("click", async () => {
+      exportCourseBtn.disabled = true;
+      exportCourseBtn.textContent = "Exporting...";
+      try {
+        const res = await sendMessageToBackground({
+          type: "PL_EXPORT_CALENDAR_ICS",
+          payload: { scope: "course", courseInstanceId },
+        });
+        if (!res?.ok || typeof res.ics !== "string") {
+          throw new Error(res?.error || "Export failed.");
+        }
+        const blob = new Blob([res.ics], { type: "text/calendar;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = res.filename || `prairielearn-course-${courseInstanceId}-deadlines.ics`;
+        link.click();
+        URL.revokeObjectURL(url);
+        if (countSpan) {
+          countSpan.textContent = `Downloaded ${res.count || 1} deadline${res.count === 1 ? "" : "s"}.`;
+        }
+      } catch (err) {
+        if (countSpan) {
+          countSpan.textContent = `Export failed: ${toErrorMessage(err)}`;
+        }
+      } finally {
+        exportCourseBtn.disabled = false;
+        exportCourseBtn.textContent = "Download Course .ics";
+      }
+    });
+  }
+
+  function updateSummary() {
+    if (!summaryCard) return;
+    const groups = parseRows();
+    const rawItems = groups.flatMap((g) => g.items.map((entry) => entry.item)).filter((i) => !i.isUnknown);
+    const engine = getProgressSummaryEngine();
+    if (engine && typeof engine.aggregateProgress === "function") {
+      const summary = engine.aggregateProgress(rawItems, { now: Date.now() });
+      renderCourseProgressSummaryCard(summary, summaryCard, { now: Date.now() });
+    }
+  }
+
+  if (chrome?.storage?.local) {
+    chrome.storage.local.get([storageKey], (res) => {
+      const pref = res?.[storageKey] || {};
+      if (pref.hideCompleted && hideCompletedCheckbox) hideCompletedCheckbox.checked = true;
+      if (pref.onlyActiveDueSoon && dueSoonCheckbox) dueSoonCheckbox.checked = true;
+      applyFilters();
+      updateSummary();
+    });
+  } else {
+    applyFilters();
+    updateSummary();
+  }
+
+  let debounceTimer = null;
+  const observer = new MutationObserver((mutations) => {
+    const isInternal = mutations.every((m) => {
+      return (
+        m.target.id === "pl-filter-zero-row" ||
+        (m.target.closest && m.target.closest("#pl-assessment-filter-toolbar")) ||
+        (m.target.closest && m.target.closest("#pl-course-progress-summary-card")) ||
+        (m.type === "attributes" && (m.attributeName === "hidden" || m.attributeName === "aria-hidden"))
+      );
+    });
+    if (isInternal) return;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      applyFilters();
+      updateSummary();
+    }, 150);
+  });
+  observer.observe(getAssessmentsTableFrom(tbody) || tbody, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ["class", "style"],
+  });
+  window.addEventListener("beforeunload", () => observer.disconnect(), { once: true });
+}
+
+if (typeof window !== "undefined") {
+  window.__PL_PRODUCTION_RUNTIME__ = {
+    resolvePrairieLearnAssessmentUrl,
+    isEligibleForCalendarAction,
+    buildGoogleCalendarComposeUrl,
+    buildOutlookWebComposeUrl,
+    filterAssessmentItem,
+    isAssessment100PercentCompleted,
+    isAssessmentActiveOrDueSoon,
+    matchesAssessmentSearch,
+    renderCourseProgressSummaryCard,
+    formatSummaryHeadline,
+    getProgressSummaryEngine,
+  };
 }
