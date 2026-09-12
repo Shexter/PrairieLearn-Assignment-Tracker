@@ -1877,9 +1877,14 @@ function getProgressSummaryEngine() {
   }
   if (typeof require === "function") {
     try {
-      const mod = require("../shared/progress-summary.js");
+      const mod = require("./progress-summary.js");
       return (typeof globalThis !== "undefined" && globalThis.PrairieLearnProgressSummary) || mod;
-    } catch {}
+    } catch {
+      try {
+        const mod = require("../shared/progress-summary.js");
+        return (typeof globalThis !== "undefined" && globalThis.PrairieLearnProgressSummary) || mod;
+      } catch {}
+    }
   }
   return null;
 }

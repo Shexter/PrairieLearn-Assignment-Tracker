@@ -7,6 +7,7 @@ for (const file of [
   "assessment-content.js",
   "question-content.js",
   "libs/html2canvas.min.js",
+  "progress-summary.js",
   "popup/popup.js",
   "popup/popup.css",
 ]) {
@@ -15,6 +16,7 @@ for (const file of [
 for (const manifest of ["Chrome/manifest.json", "Firefox/manifest.json"]) {
   const parsed = JSON.parse(fs.readFileSync(manifest, "utf8"));
   assert.ok(parsed.permissions.includes("storage"));
+  assert.ok(parsed.content_scripts[0].js.includes("progress-summary.js"));
   assert.ok(parsed.content_scripts[0].js.includes("home-content.js"));
   assert.ok(parsed.permissions.includes("identity"));
 }

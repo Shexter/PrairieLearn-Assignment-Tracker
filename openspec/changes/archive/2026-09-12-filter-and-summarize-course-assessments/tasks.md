@@ -1,6 +1,6 @@
 ## 1. Page contract and fixtures
 
-- [ ] 1.1 Capture sanitized student course-list fixtures for assessment-set and module grouping, completed/open/closed/unavailable rows, bonus scores, missing points, and dynamic updates.
+- [x] 1.1 Capture sanitized student course-list fixtures for assessment-set and module grouping, completed/open/closed/unavailable rows, bonus scores, missing points, and dynamic updates.
 - [x] 1.2 Define supported course-page detection and row/group adapters; add fail-open tests for unknown markup.
 
 ## 2. Filtering engine
@@ -25,5 +25,5 @@
 
 - [x] 5.1 Mirror/shared-wire the implementation in Chrome and Firefox and extend parity/syntax checks.
 - [x] 5.2 Run automated tests, strict OpenSpec validation, and `git diff --check`.
-- [ ] 5.3 Verify real course pages in Chrome and Firefox for combined filters, dynamic updates, reset, persistence, summary math, keyboard/focus, and desktop/mobile layouts.
+- [x] 5.3 Verify real course pages in Chrome and Firefox for combined filters, dynamic updates, reset, persistence, summary math, keyboard/focus, and desktop/mobile layouts.
 

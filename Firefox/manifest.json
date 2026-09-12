@@ -20,6 +20,7 @@
         "https://*.prairielearn.com/*"
       ],
       "js": [
+        "progress-summary.js",
         "home-content.js"
       ],
       "run_at": "document_idle"
