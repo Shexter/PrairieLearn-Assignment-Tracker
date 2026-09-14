@@ -15,16 +15,27 @@
         <div class="actions">
           <button id="refreshBtn" type="button" class="primary">Refresh</button>
           <button id="openHomeBtn" type="button" class="secondary">Open Home</button>
+          <button id="openPtBtn" type="button" class="secondary">Open PrairieTest</button>
           <button id="calendarBtn" type="button" class="primary">Sync Google Calendar</button>
           <div class="ics-scope-container">
             <select id="icsScopeSelect" class="secondary" aria-label="ICS export scope" title="Select ICS export scope">
               <option value="all">All future deadlines</option>
               <option value="week">Next 7 days only</option>
+              <option value="prairietest">PrairieTest exams only</option>
             </select>
             <button id="icsBtn" type="button" class="secondary">Download .ics</button>
           </div>
         </div>
       </header>
+
+      <div id="prairieTestAlert" class="prairietest-alert hidden" role="alert">
+        <div class="alert-icon">⚠️</div>
+        <div class="alert-content">
+          <strong id="ptAlertTitle">Action Required: Unreserved PrairieTest Exam!</strong>
+          <p id="ptAlertDesc" class="alert-desc"></p>
+        </div>
+        <button id="ptAlertBtn" type="button" class="btn-alert">Reserve Now</button>
+      </div>
 
       <section>
         <table class="upcoming" aria-label="Upcoming assessments">

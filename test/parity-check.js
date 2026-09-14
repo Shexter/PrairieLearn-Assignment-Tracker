@@ -10,6 +10,8 @@ for (const file of [
   "progress-summary.js",
   "popup/popup.js",
   "popup/popup.css",
+  "popup/popup.html",
+  "prairietest-content.js",
 ]) {
   assert.equal(fs.readFileSync(`Chrome/${file}`, "utf8"), fs.readFileSync(`Firefox/${file}`, "utf8"), `${file} drifted between browsers`);
 }

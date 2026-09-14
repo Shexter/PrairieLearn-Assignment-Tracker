@@ -107,6 +107,7 @@
       }
 
       const badge = normalizeWhitespace(badgeElement.textContent);
+      const colorClass = Array.from(badgeElement.classList || []).find((c) => c.startsWith("color-")) || null;
 
       const titleCell = cellAt(cells, columns.title);
       const linkElement = titleCell?.querySelector("a") || null;
@@ -145,6 +146,7 @@
         courseLabel,
         group: currentGroup,
         badge,
+        colorClass,
         title,
         href,
         absoluteUrl,

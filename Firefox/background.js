@@ -1,6 +1,9 @@
 const STORAGE_META_KEY = "pl.meta";
 const STORAGE_COURSE_PREFIX = "pl.course.";
 const STORAGE_PINNED_KEY = "pl.pinned_assessments";
+const STORAGE_PRAIRIETEST_RESERVATIONS_KEY = "pl.prairietest.reservations";
+const STORAGE_PRAIRIETEST_UNRESERVED_KEY = "pl.prairietest.unreserved";
+const STORAGE_PRAIRIETEST_META_KEY = "pl.prairietest.meta";
 const REFRESH_CONCURRENCY = 3;
 const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 const CALENDAR_API_BASE = "https://www.googleapis.com/calendar/v3";
@@ -59,6 +62,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
+      if (message.type === "PT_DATA_DISCOVERED") {
+        const payload = message.payload || {};
+        const result = await handlePrairieTestDataDiscovered(payload, sender);
+        sendResponse({ ok: true, ...result });
+        return;
+      }
+
+      if (message.type === "PT_GET_DATA") {
+        const data = await getPrairieTestData();
+        sendResponse({ ok: true, data });
+        return;
+      }
+
       if (message.type === "PL_SYNC_GOOGLE_CALENDAR") {
         const dashboard = await buildDashboardData();
         const result = await syncGoogleCalendar(dashboard, sender);
@@ -72,8 +88,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const origin = getCalendarOrigin(dashboard, sender);
         let items = [];
         let filename = `prairielearn-deadlines-${new Date().toISOString().slice(0, 10)}.ics`;
-        if (payload.singleAssessment) {
-          if (isEligibleForCalendarAction(payload.singleAssessment, origin)) {
+        if (payload.scope === "prairietest") {
+          const ptItems = (dashboard.prairietestReservations || []).map((r) => ({ ...r, isPrairieTest: true }));
+          items = ptItems.filter((r) => Date.parse(r.startDate) > Date.now());
+          filename = `prairietest-reservations-${new Date().toISOString().slice(0, 10)}.ics`;
+        } else if (payload.singleAssessment) {
+          if (payload.singleAssessment.isPrairieTest) {
+            items = [payload.singleAssessment];
+            filename = `prairietest-${String(payload.singleAssessment.id || "exam")}.ics`;
+          } else if (isEligibleForCalendarAction(payload.singleAssessment, origin)) {
             items = [payload.singleAssessment];
             const slug = String(payload.singleAssessment.badge || payload.singleAssessment.title || "deadline")
               .toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
@@ -146,6 +169,84 @@ async function handleHomeCoursesDiscovered(payload, sender) {
   });
 
   return refreshCourses(origin, courseInstanceIds);
+}
+
+async function handlePrairieTestDataDiscovered(payload, sender) {
+  const origin = payload?.origin || getSenderOrigin(sender) || "https://us.prairietest.com";
+  const reservations = Array.isArray(payload?.reservations) ? payload.reservations : [];
+  const unreservedExams = Array.isArray(payload?.unreservedExams) ? payload.unreservedExams : [];
+  const capturedAt = payload?.capturedAt || new Date().toISOString();
+
+  if (payload?.isSingleReservation && reservations.length === 1) {
+    const current = await getPrairieTestData();
+    const existing = current.reservations || [];
+    const newRes = reservations[0];
+    const index = existing.findIndex(
+      (r) => (newRes.id && r.id === newRes.id) || (newRes.absoluteUrl && r.absoluteUrl === newRes.absoluteUrl)
+    );
+    let updated;
+    if (index >= 0) {
+      updated = [...existing];
+      updated[index] = { ...existing[index], ...newRes };
+    } else {
+      updated = [newRes, ...existing];
+    }
+    await ext.storage.local.set({
+      [STORAGE_PRAIRIETEST_RESERVATIONS_KEY]: updated,
+      [STORAGE_PRAIRIETEST_META_KEY]: {
+        ...(current.meta || {}),
+        origin,
+        lastCapturedAt: capturedAt,
+        reservationCount: updated.length,
+      },
+    });
+    return { reservationCount: updated.length, unreservedCount: current.unreservedExams.length };
+  }
+
+  await ext.storage.local.set({
+    [STORAGE_PRAIRIETEST_RESERVATIONS_KEY]: reservations,
+    [STORAGE_PRAIRIETEST_UNRESERVED_KEY]: unreservedExams,
+    [STORAGE_PRAIRIETEST_META_KEY]: {
+      origin,
+      lastCapturedAt: capturedAt,
+      reservationCount: reservations.length,
+      unreservedCount: unreservedExams.length,
+    },
+  });
+
+  await updateExtensionBadge(unreservedExams.length, reservations.length);
+  return { reservationCount: reservations.length, unreservedCount: unreservedExams.length };
+}
+
+async function getPrairieTestData() {
+  const all = await ext.storage.local.get([
+    STORAGE_PRAIRIETEST_RESERVATIONS_KEY,
+    STORAGE_PRAIRIETEST_UNRESERVED_KEY,
+    STORAGE_PRAIRIETEST_META_KEY,
+  ]);
+  return {
+    reservations: Array.isArray(all[STORAGE_PRAIRIETEST_RESERVATIONS_KEY]) ? all[STORAGE_PRAIRIETEST_RESERVATIONS_KEY] : [],
+    unreservedExams: Array.isArray(all[STORAGE_PRAIRIETEST_UNRESERVED_KEY]) ? all[STORAGE_PRAIRIETEST_UNRESERVED_KEY] : [],
+    meta: all[STORAGE_PRAIRIETEST_META_KEY] || null,
+  };
+}
+
+async function updateExtensionBadge(unreservedCount, reservationCount) {
+  if (!ext?.action?.setBadgeText) return;
+  if (unreservedCount > 0) {
+    await ext.action.setBadgeText({ text: "!" });
+    if (ext.action.setBadgeBackgroundColor) {
+      await ext.action.setBadgeBackgroundColor({ color: "#dc3545" });
+    }
+    if (ext.action.setTitle) {
+      await ext.action.setTitle({ title: `PrairieLearn Tracker: ${unreservedCount} unreserved PrairieTest exam${unreservedCount > 1 ? "s" : ""}!` });
+    }
+  } else {
+    await ext.action.setBadgeText({ text: "" });
+    if (ext.action.setTitle) {
+      await ext.action.setTitle({ title: "PrairieLearn Tracker" });
+    }
+  }
 }
 
 async function handleRefreshRequest(payload, sender) {
@@ -901,6 +1002,7 @@ async function buildDashboardData() {
         courseLabel: assessment.courseLabel || snapshot.courseLabel || snapshot.courseInstanceId || "Course",
         group: assessment.group || null,
         badge: assessment.badge || null,
+        colorClass: assessment.colorClass || null,
         title: assessment.title || "Untitled",
         href: assessment.absoluteUrl || toAbsoluteAssessmentUrl(snapshot.origin, assessment.href),
         dueAt: assessment.dueAt || null,
@@ -919,6 +1021,44 @@ async function buildDashboardData() {
     }
   }
 
+  const ptReservations = Array.isArray(all[STORAGE_PRAIRIETEST_RESERVATIONS_KEY])
+    ? all[STORAGE_PRAIRIETEST_RESERVATIONS_KEY]
+    : [];
+  const ptUnreserved = Array.isArray(all[STORAGE_PRAIRIETEST_UNRESERVED_KEY])
+    ? all[STORAGE_PRAIRIETEST_UNRESERVED_KEY]
+    : [];
+  const ptMeta = all[STORAGE_PRAIRIETEST_META_KEY] || null;
+
+  for (const res of ptReservations) {
+    const startTime = Date.parse(res.startDate);
+    if (Number.isNaN(startTime) || startTime <= nowMs) {
+      continue;
+    }
+    upcoming.push({
+      courseInstanceId: res.courseInstanceId || "prairietest",
+      courseLabel: res.courseLabel || "PrairieTest",
+      group: "PrairieTest Exam Reservations",
+      badge: "Exam",
+      colorClass: "color-red2",
+      title: res.examTitle || res.title || "Exam Reservation",
+      fullTitle: res.title,
+      href: res.absoluteUrl || res.href,
+      dueAt: res.startDate,
+      deadlineAt: res.startDate,
+      startDate: res.startDate,
+      endDate: res.endDate,
+      durationMinutes: res.durationMinutes || 60,
+      location: res.location || "",
+      sessionDetails: res.sessionDetails || "",
+      deadlineSource: "prairietest",
+      status: "reserved",
+      score: `${res.durationMinutes || 60}m In-person`,
+      isPrairieTest: true,
+      id: res.id,
+      capturedAt: res.capturedAt || ptMeta?.lastCapturedAt || null,
+    });
+  }
+
   if (pinnedStoreChanged) {
     await chrome.storage.local.set({ [STORAGE_PINNED_KEY]: pinnedById });
   }
@@ -932,9 +1072,26 @@ async function buildDashboardData() {
       assessments: assessmentCount,
       upcoming: upcoming.length,
       pinned: pinnedCount,
+      prairietestReservations: ptReservations.length,
+      prairietestUnreserved: ptUnreserved.length,
     },
     upcoming,
-    calendarItems: upcoming.filter((item) => item.deadlineAt && item.deadlineSource && item.deadlineSource !== "legacy" && item.href),
+    prairietestReservations: ptReservations,
+    prairietestUnreserved: ptUnreserved,
+    prairietestMeta: ptMeta,
+    calendarItems: [
+      ...upcoming.filter((item) => !item.isPrairieTest && item.deadlineAt && item.deadlineSource && item.deadlineSource !== "legacy" && item.href),
+      ...ptReservations.filter((res) => {
+        const start = Date.parse(res.startDate);
+        return !Number.isNaN(start) && start > nowMs;
+      }).map((res) => ({
+        ...res,
+        isPrairieTest: true,
+        deadlineAt: res.startDate,
+        deadlineSource: "prairietest",
+        href: res.absoluteUrl || res.href,
+      })),
+    ],
   };
 }
 
@@ -1210,7 +1367,13 @@ function getCalendarOrigin(dashboard, sender) {
 function getCalendarItems(dashboard, origin = "https://us.prairielearn.com") {
   const now = Date.now();
   return (Array.isArray(dashboard?.calendarItems) ? dashboard.calendarItems : [])
-    .filter((item) => item?.deadlineSource !== "legacy" && isEligibleForCalendarAction(item, origin, now));
+    .filter((item) => {
+      if (item?.isPrairieTest) {
+        const start = Date.parse(item.startDate || item.deadlineAt);
+        return !Number.isNaN(start) && start > now;
+      }
+      return item?.deadlineSource !== "legacy" && isEligibleForCalendarAction(item, origin, now);
+    });
 }
 
 function getGoogleClientId() {
@@ -1304,7 +1467,14 @@ async function syncGoogleCalendar(dashboard, sender) {
 }
 
 function calendarEventMatches(existing, expected) {
-  return existing.summary === expected.summary && existing.description === expected.description && existing.start?.dateTime === expected.start.dateTime && existing.end?.dateTime === expected.end.dateTime && existing.source?.url === expected.source.url;
+  return (
+    existing.summary === expected.summary &&
+    existing.description === expected.description &&
+    (existing.location || "") === (expected.location || "") &&
+    existing.start?.dateTime === expected.start.dateTime &&
+    existing.end?.dateTime === expected.end.dateTime &&
+    existing.source?.url === expected.source.url
+  );
 }
 
 function resolvePrairieLearnAssessmentUrl(rawUrl, origin = "https://us.prairielearn.com") {
@@ -1369,6 +1539,37 @@ function isEligibleForCalendarAction(item, origin = "https://us.prairielearn.com
 }
 
 async function buildGoogleCalendarEvent(item, origin = "https://us.prairielearn.com") {
+  if (item?.isPrairieTest) {
+    const digest = await digestHex(`prairietest|${item.id || item.href || item.title}`);
+    const summary = `Exam: ${item.title || "PrairieTest Exam"}`;
+    const resolvedUrl = item.absoluteUrl || item.href || "https://us.prairietest.com/pt";
+    const details = [
+      "PrairieTest Exam Reservation",
+      item.location ? `Location: ${item.location}` : null,
+      item.sessionDetails ? `Details: ${item.sessionDetails}` : null,
+      `Reservation: ${resolvedUrl}`,
+    ].filter(Boolean).join("\n");
+    const start = new Date(item.startDate || item.deadlineAt);
+    const end = new Date(item.endDate || (start.getTime() + (item.durationMinutes || 60) * 60 * 1000));
+    return {
+      id: `ptv1${digest}`,
+      summary,
+      description: details,
+      location: item.location || "",
+      source: { title: "PrairieTest reservation", url: resolvedUrl },
+      start: { dateTime: start.toISOString() },
+      end: { dateTime: end.toISOString() },
+      transparency: "opaque",
+      extendedProperties: {
+        private: {
+          prairieLearnTracker: "v1",
+          prairieTestReservation: "true",
+          reservationId: String(item.id || ""),
+        },
+      },
+    };
+  }
+
   if (!isEligibleForCalendarAction(item, origin)) return null;
   const identity = buildAssessmentIdentity(item, item.courseInstanceId, origin);
   if (!identity || !item.deadlineAt) return null;
@@ -1456,8 +1657,9 @@ async function buildTrackerIcs(items, origin, now = Date.now()) {
       `DTEND:${utc(event.end.dateTime)}`,
       `SUMMARY:${esc(event.summary)}`,
       `DESCRIPTION:${esc(event.description)}`,
+      event.location ? `LOCATION:${esc(event.location)}` : null,
       `URL:${event.source.url}`,
-    ];
+    ].filter(Boolean);
     if (valarms.length > 0) {
       lines.push(...valarms);
     }

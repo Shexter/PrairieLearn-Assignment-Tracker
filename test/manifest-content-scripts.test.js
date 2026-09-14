@@ -6,8 +6,10 @@ const assessmentMatch =
   "https://*.prairielearn.com/pl/course_instance/*/assessment_instance/*";
 const questionMatch =
   "https://*.prairielearn.com/pl/course_instance/*/instance_question/*";
+const prairietestMatch = "https://*.prairietest.com/*";
 const expectedHostPermissions = [
   "https://*.prairielearn.com/*",
+  "https://*.prairietest.com/*",
   "https://accounts.google.com/*",
   "https://www.googleapis.com/*",
 ];
@@ -31,7 +33,7 @@ for (const [browser, expectedPermissions] of [
   ["Chrome", ["storage", "tabs", "scripting", "identity", "offscreen"]],
   ["Firefox", ["storage", "tabs", "scripting", "identity"]],
 ]) {
-  test(`${browser} registers the assessment and question content scripts`, () => {
+  test(`${browser} registers the assessment, question, and prairietest content scripts`, () => {
     const manifest = readManifest(`${browser}/manifest.json`);
 
     assertContentScript(manifest, assessmentMatch, ["assessment-content.js"]);
@@ -39,6 +41,7 @@ for (const [browser, expectedPermissions] of [
       "libs/html2canvas.min.js",
       "question-content.js",
     ]);
+    assertContentScript(manifest, prairietestMatch, ["prairietest-content.js"]);
   });
 
   test(`${browser} preserves its existing permissions`, () => {

@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
+const path = require("node:path");
 const vm = require("node:vm");
 const { JSDOM } = require("jsdom");
 
@@ -610,5 +611,13 @@ test("4.3 summary card rendering: renders unmeasurable progress state when nothi
   const disclaimer = card.querySelector("#pl-progress-disclaimer");
   assert.ok(disclaimer);
   assert.ok(disclaimer.textContent.includes("Not an official course grade"));
+});
+
+test("4.4 course progress summary card UI is shelved and disabled", () => {
+  const content = fs.readFileSync(
+    path.resolve(process.cwd(), "Chrome/home-content.js"),
+    "utf8"
+  );
+  assert.match(content, /const\s+ENABLE_COURSE_PROGRESS_SUMMARY\s*=\s*false;/);
 });
 

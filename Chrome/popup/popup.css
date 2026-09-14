@@ -311,3 +311,224 @@ select.secondary {
 .pl-cal-dropdown-menu button:hover {
   background: #f1f5f9;
 }
+
+.prairietest-alert {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-left: 4px solid #d97706;
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+
+.prairietest-alert.hidden {
+  display: none;
+}
+
+.prairietest-alert .alert-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.prairietest-alert .alert-content {
+  flex: 1;
+}
+
+.prairietest-alert .alert-content strong {
+  display: block;
+  font-size: 13px;
+  color: #92400e;
+}
+
+.prairietest-alert .alert-desc {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: #b45309;
+}
+
+.prairietest-alert .btn-alert {
+  background: #d97706;
+  color: #ffffff;
+  font-size: 12px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+  border: none;
+  cursor: pointer;
+}
+
+.prairietest-alert .btn-alert:hover {
+  background: #b45309;
+}
+
+.badge-exam {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: #9c0f00;
+  background-color: #ffc4be;
+  border: 1px solid #ff6c5c;
+  margin-left: 6px;
+  vertical-align: middle;
+  cursor: pointer;
+  transition: transform 0.1s ease, filter 0.1s ease;
+}
+
+.badge:hover, .badge-exam:hover {
+  transform: scale(1.06);
+  filter: brightness(0.94);
+}
+
+.sub-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* PrairieLearn Design System Colors for Badges */
+.badge.color-red1 { color: #c73000; background-color: #ffebe4; border-color: #ffccbc; }
+.badge.color-red2 { color: #9c0f00; background-color: #ffc4be; border-color: #ff6c5c; }
+.badge.color-red3 { color: #5a140d; background-color: #f2aba3; border-color: #c72c1c; }
+.badge.color-pink1 { color: #c70053; background-color: #ffe4ef; border-color: #ffbcd8; }
+.badge.color-pink2 { color: #95053c; background-color: #fdbed6; border-color: #fa5c98; }
+.badge.color-pink3 { color: #540d28; background-color: #f2a8c4; border-color: #ba1c58; }
+.badge.color-purple1 { color: #72437b; background-color: #f1e8f3; border-color: #dcc6e0; }
+.badge.color-purple2 { color: #472555; background-color: #d7bde2; border-color: #9b59b6; }
+.badge.color-purple3 { color: #2a0938; background-color: #dcaaf1; border-color: #5e147d; }
+.badge.color-blue1 { color: #006f8c; background-color: #b0eeff; border-color: #39d5ff; }
+.badge.color-blue2 { color: #084465; background-color: #9cd7f7; border-color: #1297e0; }
+.badge.color-blue3 { color: #002748; background-color: #7ec4ff; border-color: #0057a0; }
+.badge.color-turquoise1 { color: #047573; background-color: #bffdfc; border-color: #5efaf7; }
+.badge.color-turquoise2 { color: #125b56; background-color: #a5eee9; border-color: #27cbc0; }
+.badge.color-turquoise3 { color: #003f3a; background-color: #6bfff3; border-color: #008b80; }
+.badge.color-green1 { color: #00632d; background-color: #d2ffe6; border-color: #8effc1; }
+.badge.color-green2 { color: #155c33; background-color: #aaecc6; border-color: #2ecc71; }
+.badge.color-green3 { color: #003f16; background-color: #6bff9f; border-color: #008c31; }
+.badge.color-yellow1 { color: #665502; background-color: #fef8db; border-color: #fdeea5; }
+.badge.color-yellow2 { color: #7f6606; background-color: #fbebad; border-color: #f5ce32; }
+.badge.color-yellow3 { color: #604800; background-color: #ffe289; border-color: #d6a100; }
+.badge.color-orange1 { color: #995000; background-color: #fff1e1; border-color: #ffdcb5; }
+.badge.color-orange2 { color: #a32b00; background-color: #ffd3c4; border-color: #ff926b; }
+.badge.color-orange3 { color: #582513; background-color: #ebb8a6; border-color: #c3522b; }
+.badge.color-gray1 { color: #656565; background-color: #f3f3f3; border-color: #e0e0e0; }
+.badge.color-gray2 { color: #414141; background-color: #d3d3d3; border-color: #909090; }
+.badge.color-gray3 { color: #242424; background-color: #bdbdbd; border-color: #505050; }
+
+/* Color Picker Popover */
+.pl-color-picker-popover {
+  position: absolute;
+  z-index: 99999;
+  background: #ffffff;
+  border: 1px solid #d0d7de;
+  border-radius: 8px;
+  padding: 10px;
+  box-shadow: 0 8px 24px rgba(140, 149, 159, 0.28);
+  font-family: inherit;
+  font-size: 12px;
+  width: 250px;
+  animation: plFadeIn 0.15s ease-out;
+}
+
+@keyframes plFadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.pl-color-picker-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-weight: 600;
+  color: #1f2328;
+  margin-bottom: 8px;
+  font-size: 11px;
+}
+
+.pl-color-picker-close {
+  background: none;
+  border: none;
+  font-size: 16px;
+  line-height: 1;
+  color: #656d76;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.pl-color-picker-close:hover {
+  color: #1f2328;
+}
+
+.pl-color-swatches-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.pl-color-swatch-btn {
+  height: 24px;
+  border-radius: 4px;
+  border: 1px solid;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: transform 0.1s ease;
+}
+
+.pl-color-swatch-btn:hover {
+  transform: scale(1.1);
+  filter: brightness(0.92);
+}
+
+.pl-color-picker-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid #eaeef2;
+  padding-top: 8px;
+  font-size: 11px;
+}
+
+.pl-color-custom-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+  color: #57606a;
+}
+
+.pl-color-input {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  background: none;
+}
+
+.pl-color-reset-btn {
+  background: #f6f8fa;
+  border: 1px solid #d0d7de;
+  border-radius: 4px;
+  font-size: 10px;
+  color: #57606a;
+  padding: 2px 6px;
+  cursor: pointer;
+}
+
+.pl-color-reset-btn:hover {
+  background: #eaeef2;
+  color: #24292f;
+}
+

@@ -74,11 +74,23 @@ openHomeButton.addEventListener("click", () => {
   chrome.tabs.create({ url: `${origin}/` });
 });
 
+const openPtButton = document.getElementById("openPtBtn");
+if (openPtButton) {
+  openPtButton.addEventListener("click", () => {
+    chrome.tabs.create({ url: "https://us.prairietest.com/pt" });
+  });
+}
+
 void loadDashboard();
 
 async function loadDashboard() {
   setBusy(true, "Loading dashboard...");
   try {
+    try {
+      badgeColorOverridesCache = await getBadgeColorOverrides();
+    } catch {
+      badgeColorOverridesCache = {};
+    }
     const response = await sendMessage({ type: "PL_GET_DASHBOARD" });
     if (!response?.ok) {
       throw new Error(response?.error || "Failed to load dashboard.");
@@ -100,6 +112,8 @@ function renderDashboard(data) {
   const stats = data?.stats || { courseSnapshots: 0, assessments: 0, upcoming: 0 };
 
   latestOrigin = typeof meta?.origin === "string" ? meta.origin : null;
+
+  renderPrairieTestAlert(data);
 
   if (meta?.lastError) {
     statusLine.textContent = `Last refresh warning: ${meta.lastError}`;
@@ -126,21 +140,342 @@ function renderDashboard(data) {
   emptyState.classList.add("hidden");
   for (const item of upcoming) {
     const row = document.createElement("tr");
-    row.appendChild(renderCourseCell(item));
-    row.appendChild(renderAssessmentCell(item));
+    row.appendChild(renderCourseCell(item, badgeColorOverridesCache));
+    row.appendChild(renderAssessmentCell(item, badgeColorOverridesCache));
     row.appendChild(renderDueCell(item));
     row.appendChild(renderStatusCell(item));
     upcomingBody.appendChild(row);
   }
 }
 
-function renderCourseCell(item) {
+function renderPrairieTestAlert(data) {
+  const alertEl = document.getElementById("prairieTestAlert");
+  if (!alertEl) return;
+
+  const unreserved = Array.isArray(data?.prairietestUnreserved) ? data.prairietestUnreserved : [];
+  if (!unreserved.length) {
+    alertEl.classList.add("hidden");
+    return;
+  }
+
+  alertEl.classList.remove("hidden");
+  const ptAlertTitle = document.getElementById("ptAlertTitle");
+  const ptAlertDesc = document.getElementById("ptAlertDesc");
+  const ptAlertBtn = document.getElementById("ptAlertBtn");
+
+  const count = unreserved.length;
+  if (ptAlertTitle) {
+    ptAlertTitle.textContent = `Action Required: ${count} Unreserved PrairieTest Exam${count > 1 ? "s" : ""}!`;
+  }
+  const first = unreserved[0];
+  const deadlineText = first.reserveDeadlineFormatted ? `Recommended to reserve before ${first.reserveDeadlineFormatted}` : "Reserve your exam timeslot";
+  if (ptAlertDesc) {
+    ptAlertDesc.textContent = `${first.title}: ${deadlineText}`;
+  }
+  if (ptAlertBtn) {
+    ptAlertBtn.onclick = () => {
+      chrome.tabs.create({ url: first.reserveUrl || "https://us.prairietest.com/pt" });
+    };
+  }
+}
+
+const STORAGE_BADGE_COLOR_OVERRIDES_KEY = "badge_color_overrides";
+
+const PL_BADGE_PALETTES = [
+  { id: "color-purple3", label: "Purple", text: "#2a0938", bg: "#dcaaf1", border: "#5e147d" },
+  { id: "color-blue1", label: "Cyan", text: "#006f8c", bg: "#b0eeff", border: "#39d5ff" },
+  { id: "color-blue2", label: "Blue", text: "#084465", bg: "#9cd7f7", border: "#1297e0" },
+  { id: "color-blue3", label: "Dark Blue", text: "#002748", bg: "#7ec4ff", border: "#0057a0" },
+  { id: "color-yellow3", label: "Yellow", text: "#604800", bg: "#ffe289", border: "#d6a100" },
+  { id: "color-green2", label: "Green", text: "#155c33", bg: "#aaecc6", border: "#2ecc71" },
+  { id: "color-pink2", label: "Pink", text: "#95053c", bg: "#fdbed6", border: "#fa5c98" },
+  { id: "color-red2", label: "Red", text: "#9c0f00", bg: "#ffc4be", border: "#ff6c5c" },
+  { id: "color-orange2", label: "Orange", text: "#a32b00", bg: "#ffd3c4", border: "#ff926b" },
+  { id: "color-turquoise2", label: "Turquoise", text: "#125b56", bg: "#a5eee9", border: "#27cbc0" },
+  { id: "color-gray2", label: "Gray", text: "#414141", bg: "#d3d3d3", border: "#909090" },
+];
+
+let badgeColorOverridesCache = {};
+
+function getBadgePrefix(badge) {
+  if (!badge) return "";
+  const str = String(badge).trim();
+  const match = str.match(/^[A-Za-z]+/);
+  return match ? match[0].toUpperCase() : str.toUpperCase();
+}
+
+function resolveBadgeColor(itemOrBadge, overrides = {}) {
+  const badgeStr = typeof itemOrBadge === "string" ? itemOrBadge : itemOrBadge?.badge || "";
+  const colorClass = typeof itemOrBadge === "object" ? itemOrBadge?.colorClass : null;
+  const isPrairieTest = typeof itemOrBadge === "object" ? itemOrBadge?.isPrairieTest : false;
+
+  const prefix = getBadgePrefix(badgeStr);
+
+  const override = overrides[badgeStr] || overrides[prefix] || overrides[prefix.toLowerCase()];
+  if (override) {
+    if (typeof override === "string") {
+      const found = PL_BADGE_PALETTES.find((p) => p.id === override);
+      if (found) return { className: found.id, ...found };
+      return { customHex: override, bg: override, text: "#ffffff", border: override };
+    }
+    if (typeof override === "object") {
+      return override;
+    }
+  }
+
+  if (isPrairieTest || prefix === "EXAM") {
+    const redPreset = PL_BADGE_PALETTES.find((p) => p.id === "color-red2");
+    return { className: "color-red2", ...redPreset };
+  }
+
+  if (colorClass && colorClass.startsWith("color-")) {
+    const found = PL_BADGE_PALETTES.find((p) => p.id === colorClass);
+    return { className: colorClass, ...(found || {}) };
+  }
+
+  const DEFAULT_MAP = {
+    P: "color-purple3",
+    QI: "color-blue1",
+    Q: "color-blue2",
+    T: "color-yellow3",
+    L: "color-blue3",
+    I: "color-purple1",
+    R: "color-pink2",
+    HW: "color-green2",
+    EXAM: "color-red2",
+  };
+
+  const defaultId = DEFAULT_MAP[prefix];
+  if (defaultId) {
+    const found = PL_BADGE_PALETTES.find((p) => p.id === defaultId);
+    return { className: defaultId, ...(found || {}) };
+  }
+
+  let hash = 0;
+  for (let i = 0; i < prefix.length; i++) {
+    hash = (hash * 31 + prefix.charCodeAt(i)) % PL_BADGE_PALETTES.length;
+  }
+  const hashed = PL_BADGE_PALETTES[hash];
+  return { className: hashed.id, ...hashed };
+}
+
+function applyBadgeStyle(badgeEl, itemOrBadge, overrides = {}) {
+  const badgeStr = typeof itemOrBadge === "string" ? itemOrBadge : itemOrBadge?.badge || "";
+  const style = resolveBadgeColor(itemOrBadge, overrides);
+  const prefix = getBadgePrefix(badgeStr);
+
+  Array.from(badgeEl.classList).forEach((cls) => {
+    if (cls.startsWith("color-")) {
+      badgeEl.classList.remove(cls);
+    }
+  });
+
+  if (style.className) {
+    badgeEl.classList.add(style.className);
+    badgeEl.style.backgroundColor = "";
+    badgeEl.style.color = "";
+    badgeEl.style.borderColor = "";
+  } else if (style.customHex) {
+    badgeEl.style.backgroundColor = style.bg;
+    badgeEl.style.color = style.text || "#ffffff";
+    badgeEl.style.borderColor = style.border || style.bg;
+  }
+
+  badgeEl.title = `Tag: ${badgeStr} (Click to change color for "${prefix}" tags)`;
+  badgeEl.style.cursor = "pointer";
+  badgeEl.setAttribute("data-badge-prefix", prefix);
+  badgeEl.setAttribute("data-badge-tag", badgeStr);
+}
+
+function closeBadgeColorPicker() {
+  const existing = document.getElementById("pl-badge-color-picker-popover");
+  if (existing) existing.remove();
+}
+
+async function getBadgeColorOverrides() {
+  return new Promise((resolve) => {
+    if (typeof chrome === "undefined" || !chrome.storage?.local) {
+      resolve({});
+      return;
+    }
+    chrome.storage.local.get([STORAGE_BADGE_COLOR_OVERRIDES_KEY], (data) => {
+      resolve(data?.[STORAGE_BADGE_COLOR_OVERRIDES_KEY] || {});
+    });
+  });
+}
+
+async function saveBadgeColorOverride(prefix, colorValue) {
+  const current = await getBadgeColorOverrides();
+  current[prefix] = colorValue;
+  if (typeof chrome !== "undefined" && chrome.storage?.local) {
+    await chrome.storage.local.set({ [STORAGE_BADGE_COLOR_OVERRIDES_KEY]: current });
+  }
+}
+
+async function resetBadgeColorOverride(prefix) {
+  const current = await getBadgeColorOverrides();
+  delete current[prefix];
+  if (typeof chrome !== "undefined" && chrome.storage?.local) {
+    await chrome.storage.local.set({ [STORAGE_BADGE_COLOR_OVERRIDES_KEY]: current });
+  }
+}
+
+function openBadgeColorPicker(badgeEl, itemOrBadge, onColorChanged) {
+  closeBadgeColorPicker();
+
+  const badgeStr = typeof itemOrBadge === "string" ? itemOrBadge : itemOrBadge?.badge || "";
+  const prefix = getBadgePrefix(badgeStr);
+
+  const popover = document.createElement("div");
+  popover.id = "pl-badge-color-picker-popover";
+  popover.className = "pl-color-picker-popover shadow-lg";
+
+  const header = document.createElement("div");
+  header.className = "pl-color-picker-header";
+  header.innerHTML = `
+    <span>Color for <strong>${prefix}</strong> tags:</span>
+    <button type="button" class="pl-color-picker-close" aria-label="Close">&times;</button>
+  `;
+  header.querySelector(".pl-color-picker-close").onclick = (e) => {
+    e.stopPropagation();
+    closeBadgeColorPicker();
+  };
+  popover.appendChild(header);
+
+  const swatchesContainer = document.createElement("div");
+  swatchesContainer.className = "pl-color-swatches-grid";
+
+  for (const p of PL_BADGE_PALETTES) {
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "pl-color-swatch-btn";
+    swatch.title = p.label;
+    swatch.style.backgroundColor = p.bg;
+    swatch.style.color = p.text;
+    swatch.style.borderColor = p.border;
+    swatch.textContent = prefix;
+
+    swatch.onclick = async (e) => {
+      e.stopPropagation();
+      await saveBadgeColorOverride(prefix, p.id);
+      closeBadgeColorPicker();
+      if (onColorChanged) onColorChanged(prefix, p.id);
+    };
+    swatchesContainer.appendChild(swatch);
+  }
+  popover.appendChild(swatchesContainer);
+
+  const footer = document.createElement("div");
+  footer.className = "pl-color-picker-footer";
+
+  const customLabel = document.createElement("label");
+  customLabel.className = "pl-color-custom-label";
+  customLabel.textContent = "Custom: ";
+  const colorInput = document.createElement("input");
+  colorInput.type = "color";
+  colorInput.value = "#ff4d4f";
+  colorInput.className = "pl-color-input";
+  colorInput.onchange = async (e) => {
+    const hex = e.target.value;
+    await saveBadgeColorOverride(prefix, hex);
+    closeBadgeColorPicker();
+    if (onColorChanged) onColorChanged(prefix, hex);
+  };
+  customLabel.appendChild(colorInput);
+  footer.appendChild(customLabel);
+
+  const resetBtn = document.createElement("button");
+  resetBtn.type = "button";
+  resetBtn.className = "pl-color-reset-btn";
+  resetBtn.textContent = "Reset Default";
+  resetBtn.onclick = async (e) => {
+    e.stopPropagation();
+    await resetBadgeColorOverride(prefix);
+    closeBadgeColorPicker();
+    if (onColorChanged) onColorChanged(prefix, null);
+  };
+  footer.appendChild(resetBtn);
+
+  popover.appendChild(footer);
+
+  document.body.appendChild(popover);
+  const rect = badgeEl.getBoundingClientRect();
+  const popoverRect = popover.getBoundingClientRect();
+
+  let top = rect.bottom + window.scrollY + 4;
+  let left = rect.left + window.scrollX;
+
+  if (left + popoverRect.width > window.innerWidth - 10) {
+    left = window.innerWidth - popoverRect.width - 10;
+  }
+  if (left < 10) left = 10;
+
+  popover.style.top = `${top}px`;
+  popover.style.left = `${left}px`;
+
+  const onDocClick = (e) => {
+    if (!popover.contains(e.target) && e.target !== badgeEl) {
+      closeBadgeColorPicker();
+      document.removeEventListener("click", onDocClick);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", onDocClick), 10);
+}
+
+function refreshAllBadgeColorsInDocument(doc, overrides) {
+  const badges = Array.from(doc.querySelectorAll(".badge, .badge-exam"));
+  for (const el of badges) {
+    const tag = el.getAttribute("data-badge-tag") || el.textContent.trim();
+    const isPT = el.classList.contains("badge-exam") || tag.toUpperCase() === "EXAM";
+    const existingColorClass = el.getAttribute("data-original-color-class") ||
+      Array.from(el.classList).find((c) => c.startsWith("color-")) || null;
+    applyBadgeStyle(el, { badge: tag, isPrairieTest: isPT, colorClass: existingColorClass }, overrides);
+  }
+}
+
+function applyBadgeColorAndPicker(badgeEl, itemOrBadge, overrides) {
+  if (itemOrBadge?.colorClass) {
+    badgeEl.setAttribute("data-original-color-class", itemOrBadge.colorClass);
+  }
+  applyBadgeStyle(badgeEl, itemOrBadge, overrides || badgeColorOverridesCache);
+
+  badgeEl.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openBadgeColorPicker(badgeEl, itemOrBadge, (changedPrefix, newColor) => {
+      if (newColor) {
+        badgeColorOverridesCache[changedPrefix] = newColor;
+      } else {
+        delete badgeColorOverridesCache[changedPrefix];
+      }
+      refreshAllBadgeColorsInDocument(document, badgeColorOverridesCache);
+    });
+  });
+}
+
+if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes[STORAGE_BADGE_COLOR_OVERRIDES_KEY]) {
+      badgeColorOverridesCache = changes[STORAGE_BADGE_COLOR_OVERRIDES_KEY].newValue || {};
+      refreshAllBadgeColorsInDocument(document, badgeColorOverridesCache);
+    }
+  });
+}
+
+function renderCourseCell(item, overrides = badgeColorOverridesCache) {
   const cell = document.createElement("td");
   cell.textContent = item.courseLabel || "Course";
+  if (item.isPrairieTest) {
+    const examBadge = document.createElement("span");
+    examBadge.className = "badge-exam";
+    examBadge.textContent = "Exam";
+    applyBadgeColorAndPicker(examBadge, { badge: "Exam", isPrairieTest: true, colorClass: item.colorClass }, overrides);
+    cell.appendChild(examBadge);
+  }
   return cell;
 }
 
-function renderAssessmentCell(item) {
+function renderAssessmentCell(item, overrides = badgeColorOverridesCache) {
   const cell = document.createElement("td");
   const wrapper = document.createElement("div");
   wrapper.className = "assessment-title";
@@ -149,6 +484,7 @@ function renderAssessmentCell(item) {
     const badge = document.createElement("span");
     badge.className = "badge";
     badge.textContent = item.badge;
+    applyBadgeColorAndPicker(badge, item, overrides);
     wrapper.appendChild(badge);
   }
 
@@ -172,6 +508,13 @@ function renderAssessmentCell(item) {
     content.appendChild(group);
   }
 
+  if (item.location) {
+    const loc = document.createElement("div");
+    loc.className = "sub-meta";
+    loc.textContent = `📍 ${item.location}`;
+    content.appendChild(loc);
+  }
+
   wrapper.appendChild(content);
   const calMenu = renderCalendarActionMenu(item, latestOrigin || "https://us.prairielearn.com");
   if (calMenu) {
@@ -185,7 +528,12 @@ function renderDueCell(item) {
   const cell = document.createElement("td");
   cell.textContent = item.dueAt ? formatDateTime(item.dueAt) : "No due date";
 
-  if (!item.dueAt && item.availabilityText) {
+  if (item.isPrairieTest && item.durationMinutes) {
+    const sub = document.createElement("span");
+    sub.className = "sub";
+    sub.textContent = `${item.durationMinutes} min session`;
+    cell.appendChild(sub);
+  } else if (!item.dueAt && item.availabilityText) {
     const sub = document.createElement("span");
     sub.className = "sub";
     sub.textContent = item.availabilityText;
@@ -197,6 +545,13 @@ function renderDueCell(item) {
 
 function renderStatusCell(item) {
   const cell = document.createElement("td");
+  if (item.isPrairieTest) {
+    const badge = document.createElement("span");
+    badge.className = "badge-exam";
+    badge.textContent = "Reserved";
+    cell.appendChild(badge);
+    return cell;
+  }
   const percent = parseScorePercent(item.score);
 
   const progressContainer = document.createElement("div");
@@ -388,6 +743,10 @@ function isEligibleForCalendarAction(item, origin = "https://us.prairielearn.com
     targetOrigin = typeof now === "string" ? now : "https://us.prairielearn.com";
   }
   if (!item || typeof item !== "object") return false;
+  if (item.isPrairieTest) {
+    const due = Date.parse(item.startDate || item.deadlineAt);
+    return !Number.isNaN(due) && due > targetNow;
+  }
   const deadline = item.deadlineAt || (item.deadlineSource ? item.dueAt : null);
   if (!deadline) return false;
   const isClosed =
@@ -404,6 +763,28 @@ function isEligibleForCalendarAction(item, origin = "https://us.prairielearn.com
 
 function buildGoogleCalendarComposeUrl(item, origin = "https://us.prairielearn.com", now = Date.now()) {
   if (!isEligibleForCalendarAction(item, origin, now)) return null;
+  if (item.isPrairieTest) {
+    const start = new Date(item.startDate || item.deadlineAt);
+    const end = new Date(item.endDate || (start.getTime() + (item.durationMinutes || 60) * 60 * 1000));
+    const startUtc = formatUtcCompact(start);
+    const endUtc = formatUtcCompact(end);
+    if (!startUtc || !endUtc) return null;
+    const title = `Exam: ${item.fullTitle || item.title || "PrairieTest Exam"}`;
+    const details = [
+      "PrairieTest Exam Reservation",
+      item.location ? `Location: ${item.location}` : null,
+      item.sessionDetails ? `Details: ${item.sessionDetails}` : null,
+      `Reservation: ${item.href || item.absoluteUrl || "https://us.prairietest.com/pt"}`,
+    ].filter(Boolean).join("\n");
+    const params = new URLSearchParams({
+      action: "TEMPLATE",
+      text: title,
+      dates: `${startUtc}/${endUtc}`,
+      details,
+      location: item.location || "",
+    });
+    return `https://calendar.google.com/calendar/render?${params.toString()}`;
+  }
   const resolvedUrl = resolvePrairieLearnAssessmentUrl(item?.href || item?.absoluteUrl, origin);
   if (!resolvedUrl) return null;
   const deadline = item.deadlineAt || (item.deadlineSource ? item.dueAt : null);
@@ -427,6 +808,27 @@ function buildGoogleCalendarComposeUrl(item, origin = "https://us.prairielearn.c
 
 function buildOutlookWebComposeUrl(item, origin = "https://us.prairielearn.com", now = Date.now()) {
   if (!isEligibleForCalendarAction(item, origin, now)) return null;
+  if (item.isPrairieTest) {
+    const start = new Date(item.startDate || item.deadlineAt);
+    const end = new Date(item.endDate || (start.getTime() + (item.durationMinutes || 60) * 60 * 1000));
+    const title = `Exam: ${item.fullTitle || item.title || "PrairieTest Exam"}`;
+    const details = [
+      "PrairieTest Exam Reservation",
+      item.location ? `Location: ${item.location}` : null,
+      item.sessionDetails ? `Details: ${item.sessionDetails}` : null,
+      `Reservation: ${item.href || item.absoluteUrl || "https://us.prairietest.com/pt"}`,
+    ].filter(Boolean).join("\n");
+    const params = new URLSearchParams({
+      path: "/calendar/action/compose",
+      rru: "addevent",
+      subject: title,
+      startdt: start.toISOString(),
+      enddt: end.toISOString(),
+      body: details,
+      location: item.location || "",
+    });
+    return `https://outlook.live.com/calendar/0/deeplink/compose?${params.toString()}`;
+  }
   const resolvedUrl = resolvePrairieLearnAssessmentUrl(item?.href || item?.absoluteUrl, origin);
   if (!resolvedUrl) return null;
   const deadline = item.deadlineAt || (item.deadlineSource ? item.dueAt : null);
@@ -574,5 +976,9 @@ if (typeof window !== "undefined") {
     isEligibleForCalendarAction,
     buildGoogleCalendarComposeUrl,
     buildOutlookWebComposeUrl,
+    resolveBadgeColor,
+    getBadgePrefix,
+    applyBadgeStyle,
+    PL_BADGE_PALETTES,
   };
 }

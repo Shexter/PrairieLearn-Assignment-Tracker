@@ -90,11 +90,14 @@ function ensurePrairieTestHeaderLink() {
     return false;
   }
 
-  if (navList.querySelector(`#${PRAIRIE_TEST_NAV_ITEM_ID}`)) {
+  const existingItem = navList.querySelector(`#${PRAIRIE_TEST_NAV_ITEM_ID}`);
+  if (existingItem) {
+    const link = existingItem.querySelector("a.nav-link");
+    if (link) updatePrairieTestHeaderBadge(link);
     return true;
   }
 
-  const existing = Array.from(navList.querySelectorAll("a")).some((anchor) => {
+  const existingLink = Array.from(navList.querySelectorAll("a")).find((anchor) => {
     const label = normalizeWhitespace(anchor.textContent).toLowerCase();
     return (
       label === "prairietest" ||
@@ -102,7 +105,8 @@ function ensurePrairieTestHeaderLink() {
       anchor.href.startsWith(PRAIRIE_TEST_URL)
     );
   });
-  if (existing) {
+  if (existingLink) {
+    updatePrairieTestHeaderBadge(existingLink);
     return true;
   }
 
@@ -115,6 +119,7 @@ function ensurePrairieTestHeaderLink() {
   link.href = PRAIRIE_TEST_URL;
   link.textContent = "PrairieTest";
   navItem.appendChild(link);
+  updatePrairieTestHeaderBadge(link);
 
   const homeItem = Array.from(navList.querySelectorAll(":scope > li.nav-item")).find((item) => {
     const homeLink = item.querySelector("a.nav-link");
@@ -134,6 +139,460 @@ function ensurePrairieTestHeaderLink() {
   }
 
   return true;
+}
+
+function updatePrairieTestHeaderBadge(link) {
+  if (!link || typeof chrome === "undefined" || !chrome.storage?.local) return;
+  chrome.storage.local.get(["prairietest_unreserved_exams"], (data) => {
+    const unreserved = data?.prairietest_unreserved_exams;
+    let badge = link.querySelector(".pl-pt-nav-badge");
+    if (Array.isArray(unreserved) && unreserved.length > 0) {
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "badge bg-danger ms-1 pl-pt-nav-badge";
+        link.appendChild(badge);
+      }
+      badge.textContent = `⚠️ ${unreserved.length}`;
+      link.title = `PrairieTest: You have ${unreserved.length} unreserved exam${unreserved.length > 1 ? "s" : ""}!`;
+    } else if (badge) {
+      badge.remove();
+      link.title = "PrairieTest";
+    }
+  });
+}
+
+if (typeof chrome !== "undefined" && chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.prairietest_unreserved_exams) {
+      const navItem = document.getElementById(PRAIRIE_TEST_NAV_ITEM_ID);
+      const link = navItem?.querySelector("a.nav-link") || document.querySelector(`a[href^="${PRAIRIE_TEST_URL}"]`);
+      if (link) {
+        updatePrairieTestHeaderBadge(link);
+      }
+    }
+    if (area === "local" && changes[STORAGE_BADGE_COLOR_OVERRIDES_KEY]) {
+      badgeColorOverridesCache = changes[STORAGE_BADGE_COLOR_OVERRIDES_KEY].newValue || {};
+      refreshAllBadgeColorsInDocument(document, badgeColorOverridesCache);
+    }
+  });
+}
+
+const STORAGE_BADGE_COLOR_OVERRIDES_KEY = "badge_color_overrides";
+let badgeColorOverridesCache = {};
+
+const PL_BADGE_PALETTES = [
+  { id: "color-red2", label: "Red", bg: "#ffc4be", text: "#9c0f00", border: "#ff6c5c" },
+  { id: "color-pink2", label: "Pink", bg: "#fdbed6", text: "#95053c", border: "#fa5c98" },
+  { id: "color-purple3", label: "Purple", bg: "#dcaaf1", text: "#2a0938", border: "#5e147d" },
+  { id: "color-purple1", label: "Lavender", bg: "#f1e8f3", text: "#72437b", border: "#dcc6e0" },
+  { id: "color-blue1", label: "Cyan", bg: "#b0eeff", text: "#006f8c", border: "#39d5ff" },
+  { id: "color-blue2", label: "Sky Blue", bg: "#9cd7f7", text: "#084465", border: "#1297e0" },
+  { id: "color-blue3", label: "Navy", bg: "#7ec4ff", text: "#002748", border: "#0057a0" },
+  { id: "color-turquoise2", label: "Teal", bg: "#a5eee9", text: "#125b56", border: "#27cbc0" },
+  { id: "color-green2", label: "Green", bg: "#aaecc6", text: "#155c33", border: "#2ecc71" },
+  { id: "color-yellow2", label: "Yellow", bg: "#fbebad", text: "#7f6606", border: "#f5ce32" },
+  { id: "color-yellow3", label: "Gold", bg: "#ffe289", text: "#604800", border: "#d6a100" },
+  { id: "color-orange2", label: "Orange", bg: "#ffd3c4", text: "#a32b00", border: "#ff926b" },
+  { id: "color-gray2", label: "Gray", bg: "#d3d3d3", text: "#414141", border: "#909090" },
+];
+
+function getBadgePrefix(badge) {
+  if (!badge) return "";
+  const trimmed = badge.trim();
+  const match = trimmed.match(/^[A-Za-z]+/);
+  return match ? match[0].toUpperCase() : trimmed.toUpperCase();
+}
+
+function resolveBadgeColor(itemOrBadge, overrides = {}) {
+  const badgeStr = typeof itemOrBadge === "string" ? itemOrBadge : itemOrBadge?.badge || "";
+  const isPrairieTest = typeof itemOrBadge === "object" ? !!itemOrBadge.isPrairieTest : false;
+  const originalColorClass = typeof itemOrBadge === "object" ? itemOrBadge.colorClass : null;
+
+  const prefix = isPrairieTest ? "EXAM" : getBadgePrefix(badgeStr);
+
+  // 1. User overrides have highest precedence
+  const userOverride = overrides[prefix] || overrides[badgeStr];
+  if (userOverride) {
+    if (userOverride.startsWith("color-")) {
+      const found = PL_BADGE_PALETTES.find((p) => p.id === userOverride);
+      return { className: userOverride, ...(found || {}) };
+    }
+    return {
+      customHex: userOverride,
+      bg: userOverride,
+      text: "#ffffff",
+      border: userOverride,
+    };
+  }
+
+  // 2. PrairieTest Exam defaults to Red
+  if (isPrairieTest || prefix === "EXAM") {
+    const red = PL_BADGE_PALETTES.find((p) => p.id === "color-red2");
+    return { className: "color-red2", ...(red || {}) };
+  }
+
+  // 3. Original PrairieLearn colorClass if captured from page
+  if (originalColorClass && originalColorClass.startsWith("color-")) {
+    const found = PL_BADGE_PALETTES.find((p) => p.id === originalColorClass);
+    return { className: originalColorClass, ...(found || {}) };
+  }
+
+  // 4. Default color mapping based on common assignment prefixes
+  const DEFAULT_MAP = {
+    P: "color-purple3",
+    QI: "color-blue1",
+    Q: "color-blue2",
+    T: "color-yellow3",
+    L: "color-blue3",
+    I: "color-purple1",
+    R: "color-pink2",
+    HW: "color-green2",
+    EXAM: "color-red2",
+  };
+
+  const defaultId = DEFAULT_MAP[prefix];
+  if (defaultId) {
+    const found = PL_BADGE_PALETTES.find((p) => p.id === defaultId);
+    return { className: defaultId, ...(found || {}) };
+  }
+
+  // 5. Deterministic palette assignment for other tags
+  let hash = 0;
+  for (let i = 0; i < prefix.length; i++) {
+    hash = (hash * 31 + prefix.charCodeAt(i)) % PL_BADGE_PALETTES.length;
+  }
+  const hashed = PL_BADGE_PALETTES[hash];
+  return { className: hashed.id, ...hashed };
+}
+
+function applyBadgeStyle(badgeEl, itemOrBadge, overrides = {}) {
+  const badgeStr = typeof itemOrBadge === "string" ? itemOrBadge : itemOrBadge?.badge || "";
+  const style = resolveBadgeColor(itemOrBadge, overrides);
+  const prefix = (itemOrBadge?.isPrairieTest || badgeStr.toUpperCase() === "EXAM") ? "EXAM" : getBadgePrefix(badgeStr);
+
+  Array.from(badgeEl.classList).forEach((cls) => {
+    if (cls.startsWith("color-")) {
+      badgeEl.classList.remove(cls);
+    }
+  });
+
+  if (style.className) {
+    badgeEl.classList.add(style.className);
+    badgeEl.style.backgroundColor = "";
+    badgeEl.style.color = "";
+    badgeEl.style.borderColor = "";
+  } else if (style.customHex) {
+    badgeEl.style.backgroundColor = style.bg;
+    badgeEl.style.color = style.text || "#ffffff";
+    badgeEl.style.borderColor = style.border || style.bg;
+  }
+
+  badgeEl.title = `Tag: ${badgeStr} (Click to change color for "${prefix}" tags)`;
+  badgeEl.style.cursor = "pointer";
+  badgeEl.setAttribute("data-badge-prefix", prefix);
+  badgeEl.setAttribute("data-badge-tag", badgeStr);
+}
+
+function closeBadgeColorPicker() {
+  const existing = document.getElementById("pl-badge-color-picker-popover");
+  if (existing) existing.remove();
+}
+
+async function getBadgeColorOverrides() {
+  return new Promise((resolve) => {
+    if (typeof chrome === "undefined" || !chrome.storage?.local) {
+      resolve({});
+      return;
+    }
+    chrome.storage.local.get([STORAGE_BADGE_COLOR_OVERRIDES_KEY], (data) => {
+      resolve(data?.[STORAGE_BADGE_COLOR_OVERRIDES_KEY] || {});
+    });
+  });
+}
+
+async function saveBadgeColorOverride(prefix, colorValue) {
+  const current = await getBadgeColorOverrides();
+  current[prefix] = colorValue;
+  if (typeof chrome !== "undefined" && chrome.storage?.local) {
+    await chrome.storage.local.set({ [STORAGE_BADGE_COLOR_OVERRIDES_KEY]: current });
+  }
+}
+
+async function resetBadgeColorOverride(prefix) {
+  const current = await getBadgeColorOverrides();
+  delete current[prefix];
+  if (typeof chrome !== "undefined" && chrome.storage?.local) {
+    await chrome.storage.local.set({ [STORAGE_BADGE_COLOR_OVERRIDES_KEY]: current });
+  }
+}
+
+function openBadgeColorPicker(badgeEl, itemOrBadge, onColorChanged) {
+  closeBadgeColorPicker();
+
+  const isPT = itemOrBadge?.isPrairieTest || false;
+  const badgeStr = typeof itemOrBadge === "string" ? itemOrBadge : itemOrBadge?.badge || "";
+  const prefix = isPT ? "EXAM" : getBadgePrefix(badgeStr);
+
+  const popover = document.createElement("div");
+  popover.id = "pl-badge-color-picker-popover";
+  popover.className = "pl-color-picker-popover shadow-lg";
+
+  const header = document.createElement("div");
+  header.className = "pl-color-picker-header";
+  header.innerHTML = `
+    <span>Color for <strong>${prefix}</strong> tags:</span>
+    <button type="button" class="pl-color-picker-close" aria-label="Close">&times;</button>
+  `;
+  header.querySelector(".pl-color-picker-close").onclick = (e) => {
+    e.stopPropagation();
+    closeBadgeColorPicker();
+  };
+  popover.appendChild(header);
+
+  const swatchesContainer = document.createElement("div");
+  swatchesContainer.className = "pl-color-swatches-grid";
+
+  for (const p of PL_BADGE_PALETTES) {
+    const swatch = document.createElement("button");
+    swatch.type = "button";
+    swatch.className = "pl-color-swatch-btn";
+    swatch.title = p.label;
+    swatch.style.backgroundColor = p.bg;
+    swatch.style.color = p.text;
+    swatch.style.borderColor = p.border;
+    swatch.textContent = prefix;
+
+    swatch.onclick = async (e) => {
+      e.stopPropagation();
+      await saveBadgeColorOverride(prefix, p.id);
+      closeBadgeColorPicker();
+      if (typeof onColorChanged === "function") {
+        onColorChanged(prefix, p.id);
+      }
+    };
+    swatchesContainer.appendChild(swatch);
+  }
+  popover.appendChild(swatchesContainer);
+
+  const footer = document.createElement("div");
+  footer.className = "pl-color-picker-footer";
+
+  const customColorLabel = document.createElement("label");
+  customColorLabel.className = "pl-color-custom-label";
+  customColorLabel.innerHTML = `
+    <span>Custom:</span>
+    <input type="color" class="pl-color-input" value="#9c0f00">
+  `;
+  const colorInput = customColorLabel.querySelector("input");
+  colorInput.onchange = async (e) => {
+    e.stopPropagation();
+    const hex = e.target.value;
+    await saveBadgeColorOverride(prefix, hex);
+    closeBadgeColorPicker();
+    if (typeof onColorChanged === "function") {
+      onColorChanged(prefix, hex);
+    }
+  };
+  footer.appendChild(customColorLabel);
+
+  const resetBtn = document.createElement("button");
+  resetBtn.type = "button";
+  resetBtn.className = "pl-color-reset-btn";
+  resetBtn.textContent = "Reset to Default";
+  resetBtn.onclick = async (e) => {
+    e.stopPropagation();
+    await resetBadgeColorOverride(prefix);
+    closeBadgeColorPicker();
+    if (typeof onColorChanged === "function") {
+      onColorChanged(prefix, null);
+    }
+  };
+  footer.appendChild(resetBtn);
+
+  popover.appendChild(footer);
+  document.body.appendChild(popover);
+
+  const rect = badgeEl.getBoundingClientRect();
+  const popoverRect = popover.getBoundingClientRect();
+  let top = window.scrollY + rect.bottom + 4;
+  let left = window.scrollX + rect.left;
+
+  if (left + popoverRect.width > window.innerWidth - 10) {
+    left = window.innerWidth - popoverRect.width - 10;
+  }
+  if (left < 10) left = 10;
+
+  popover.style.top = `${top}px`;
+  popover.style.left = `${left}px`;
+
+  const onDocClick = (e) => {
+    if (!popover.contains(e.target) && e.target !== badgeEl) {
+      closeBadgeColorPicker();
+      document.removeEventListener("click", onDocClick);
+    }
+  };
+  setTimeout(() => document.addEventListener("click", onDocClick), 10);
+}
+
+function refreshAllBadgeColorsInDocument(doc, overrides) {
+  const badges = Array.from(doc.querySelectorAll(".badge"));
+  for (const el of badges) {
+    const tag = el.getAttribute("data-badge-tag") || el.textContent.trim();
+    if (!tag) continue;
+    const isPT = tag.toUpperCase() === "EXAM";
+    const existingColorClass = el.getAttribute("data-original-color-class") ||
+      Array.from(el.classList).find((c) => c.startsWith("color-")) || null;
+    applyBadgeStyle(el, { badge: tag, isPrairieTest: isPT, colorClass: existingColorClass }, overrides);
+  }
+}
+
+function applyBadgeColorAndPicker(badgeEl, itemOrBadge, overrides) {
+  if (itemOrBadge?.colorClass) {
+    badgeEl.setAttribute("data-original-color-class", itemOrBadge.colorClass);
+  }
+  applyBadgeStyle(badgeEl, itemOrBadge, overrides || badgeColorOverridesCache);
+
+  badgeEl.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openBadgeColorPicker(badgeEl, itemOrBadge, (changedPrefix, newColor) => {
+      if (newColor) {
+        badgeColorOverridesCache[changedPrefix] = newColor;
+      } else {
+        delete badgeColorOverridesCache[changedPrefix];
+      }
+      refreshAllBadgeColorsInDocument(document, badgeColorOverridesCache);
+    });
+  });
+}
+
+function ensureBadgeStylesInjected() {
+  if (typeof document === "undefined" || document.getElementById("pl-tracker-badge-styles")) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = "pl-tracker-badge-styles";
+  style.textContent = `
+    .badge.color-red1 { color: #c73000; background-color: #ffebe4; border-color: #ffccbc; }
+    .badge.color-red2 { color: #9c0f00; background-color: #ffc4be; border-color: #ff6c5c; }
+    .badge.color-red3 { color: #5a140d; background-color: #f2aba3; border-color: #c72c1c; }
+    .badge.color-pink1 { color: #c70053; background-color: #ffe4ef; border-color: #ffbcd8; }
+    .badge.color-pink2 { color: #95053c; background-color: #fdbed6; border-color: #fa5c98; }
+    .badge.color-pink3 { color: #540d28; background-color: #f2a8c4; border-color: #ba1c58; }
+    .badge.color-purple1 { color: #72437b; background-color: #f1e8f3; border-color: #dcc6e0; }
+    .badge.color-purple2 { color: #472555; background-color: #d7bde2; border-color: #9b59b6; }
+    .badge.color-purple3 { color: #2a0938; background-color: #dcaaf1; border-color: #5e147d; }
+    .badge.color-blue1 { color: #006f8c; background-color: #b0eeff; border-color: #39d5ff; }
+    .badge.color-blue2 { color: #084465; background-color: #9cd7f7; border-color: #1297e0; }
+    .badge.color-blue3 { color: #002748; background-color: #7ec4ff; border-color: #0057a0; }
+    .badge.color-turquoise1 { color: #047573; background-color: #bffdfc; border-color: #5efaf7; }
+    .badge.color-turquoise2 { color: #125b56; background-color: #a5eee9; border-color: #27cbc0; }
+    .badge.color-turquoise3 { color: #003f3a; background-color: #6bfff3; border-color: #008c31; }
+    .badge.color-green1 { color: #00632d; background-color: #d2ffe6; border-color: #8effc1; }
+    .badge.color-green2 { color: #155c33; background-color: #aaecc6; border-color: #2ecc71; }
+    .badge.color-green3 { color: #003f16; background-color: #6bff9f; border-color: #008c31; }
+    .badge.color-yellow1 { color: #665502; background-color: #fef8db; border-color: #fdeea5; }
+    .badge.color-yellow2 { color: #7f6606; background-color: #fbebad; border-color: #f5ce32; }
+    .badge.color-yellow3 { color: #604800; background-color: #ffe289; border-color: #d6a100; }
+    .badge.color-orange1 { color: #995000; background-color: #fff1e1; border-color: #ffdcb5; }
+    .badge.color-orange2 { color: #a32b00; background-color: #ffd3c4; border-color: #ff926b; }
+    .badge.color-orange3 { color: #582513; background-color: #ebb8a6; border-color: #c3522b; }
+    .badge.color-gray1 { color: #656565; background-color: #f3f3f3; border-color: #e0e0e0; }
+    .badge.color-gray2 { color: #414141; background-color: #d3d3d3; border-color: #909090; }
+    .badge.color-gray3 { color: #242424; background-color: #bdbdbd; border-color: #505050; }
+    .badge[data-badge-prefix]:hover { transform: scale(1.05); filter: brightness(0.95); }
+    .pl-color-picker-popover {
+      position: absolute;
+      z-index: 99999;
+      background: #ffffff;
+      border: 1px solid #d0d7de;
+      border-radius: 8px;
+      padding: 10px;
+      box-shadow: 0 8px 24px rgba(140, 149, 159, 0.28);
+      font-family: inherit;
+      font-size: 12px;
+      width: 250px;
+      animation: plFadeIn 0.15s ease-out;
+    }
+    @keyframes plFadeIn {
+      from { opacity: 0; transform: translateY(-4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .pl-color-picker-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 600;
+      color: #1f2328;
+      margin-bottom: 8px;
+      font-size: 11px;
+    }
+    .pl-color-picker-close {
+      background: none;
+      border: none;
+      font-size: 16px;
+      line-height: 1;
+      color: #656d76;
+      cursor: pointer;
+      padding: 0 4px;
+    }
+    .pl-color-picker-close:hover { color: #1f2328; }
+    .pl-color-swatches-grid {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 6px;
+      margin-bottom: 10px;
+    }
+    .pl-color-swatch-btn {
+      height: 24px;
+      border-radius: 4px;
+      border: 1px solid;
+      font-size: 10px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      transition: transform 0.1s ease;
+    }
+    .pl-color-swatch-btn:hover { transform: scale(1.1); filter: brightness(0.92); }
+    .pl-color-picker-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-top: 1px solid #eaeef2;
+      padding-top: 8px;
+      font-size: 11px;
+    }
+    .pl-color-custom-label {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      cursor: pointer;
+      color: #57606a;
+    }
+    .pl-color-input {
+      width: 22px;
+      height: 22px;
+      padding: 0;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      background: none;
+    }
+    .pl-color-reset-btn {
+      background: #f6f8fa;
+      border: 1px solid #d0d7de;
+      border-radius: 4px;
+      font-size: 10px;
+      color: #57606a;
+      padding: 2px 6px;
+      cursor: pointer;
+    }
+    .pl-color-reset-btn:hover { background: #eaeef2; color: #24292f; }
+  `;
+  (document.head || document.documentElement).appendChild(style);
 }
 
 function getHomeCardsHost() {
@@ -307,6 +766,12 @@ function createHomeUpcomingCard() {
 
 async function loadAndRenderHomeUpcomingFromBackground() {
   try {
+    ensureBadgeStylesInjected();
+    try {
+      badgeColorOverridesCache = await getBadgeColorOverrides();
+    } catch {
+      badgeColorOverridesCache = {};
+    }
     const response = await sendMessageToBackground({ type: "PL_GET_DASHBOARD" });
     if (!response?.ok) {
       throw new Error(response?.error || "Failed to load tracker dashboard.");
@@ -320,6 +785,12 @@ async function loadAndRenderHomeUpcomingFromBackground() {
 
 async function refreshAndRenderHomeUpcoming() {
   setHomeCardSubtitle("Refreshing...");
+  ensureBadgeStylesInjected();
+  try {
+    badgeColorOverridesCache = await getBadgeColorOverrides();
+  } catch {
+    badgeColorOverridesCache = {};
+  }
   const response = await sendMessageToBackground({
     type: "PL_REFRESH_REQUEST",
     payload: { origin: window.location.origin },
@@ -516,6 +987,7 @@ function collectAssessmentsForPinning(tbody, courseInstanceId) {
       }
     }
     const badge = normalizeWhitespace(badgeElement.textContent) || null;
+    const colorClass = Array.from(badgeElement.classList || []).find((c) => c.startsWith("color-")) || null;
 
     const availabilityCell = assessmentCellAt(cells, columns.availability);
     const availabilityText = normalizeWhitespace(availabilityCell?.textContent) || null;
@@ -540,6 +1012,7 @@ function collectAssessmentsForPinning(tbody, courseInstanceId) {
         courseInstanceId,
         group: currentGroup || null,
         badge,
+        colorClass,
         title,
         href,
         absoluteUrl,
@@ -562,22 +1035,23 @@ function renderAssessmentPinButton(entry, initiallyPinned) {
   if (!button) {
     button = document.createElement("button");
     button.type = "button";
-    button.className = `btn btn-xs ms-2 ${ASSESSMENT_PIN_BUTTON_CLASS}`;
-
-    const anchorParent = entry.linkElement?.parentElement;
-    if (entry.linkElement && anchorParent === entry.titleCell) {
-      entry.linkElement.insertAdjacentElement("afterend", button);
-    } else {
-      entry.titleCell.appendChild(button);
-    }
+    button.className = `btn btn-sm ${ASSESSMENT_PIN_BUTTON_CLASS}`;
+    button.setAttribute("aria-label", "Pin to tracker home card");
+    entry.titleCell.appendChild(button);
   }
 
-  updateAssessmentPinButton(button, initiallyPinned);
+  updateAssessmentPinButtonState(button, initiallyPinned);
 
-  button.onclick = async (event) => {
+  button.addEventListener("click", async (event) => {
     event.preventDefault();
     event.stopPropagation();
+
     if (button.disabled) {
+      return;
+    }
+
+    const payload = buildPinToggleAssessmentPayload(entry.assessment);
+    if (!payload) {
       return;
     }
 
@@ -587,25 +1061,25 @@ function renderAssessmentPinButton(entry, initiallyPinned) {
         type: "PL_TOGGLE_ASSESSMENT_PIN",
         payload: {
           origin: window.location.origin,
-          assessment: entry.assessment,
+          assessment: payload,
         },
       });
 
       if (!response?.ok) {
-        throw new Error(response?.error || "Failed to update pin status.");
+        throw new Error(response?.error || "Failed to update pin state.");
       }
 
-      updateAssessmentPinButton(button, Boolean(response.pinned));
+      updateAssessmentPinButtonState(button, !!response.pinned);
     } catch (error) {
-      console.warn("[PL Tracker] Failed to toggle assessment pin:", toErrorMessage(error));
+      console.warn("[PL Tracker] Failed to toggle pin state:", error);
     } finally {
       button.disabled = false;
     }
-  };
+  });
 }
 
-function updateAssessmentPinButton(button, pinned) {
-  button.textContent = pinned ? "Unpin" : "Pin";
+function updateAssessmentPinButtonState(button, pinned) {
+  button.textContent = pinned ? "Pinned" : "Pin";
   button.title = pinned ? "Remove from the tracker home card" : "Pin to the tracker home card";
   button.classList.toggle("btn-warning", pinned);
   button.classList.toggle("btn-outline-secondary", !pinned);
@@ -625,6 +1099,7 @@ function buildPinToggleAssessmentPayload(item) {
     courseInstanceId,
     title: typeof item.title === "string" ? item.title : "",
     badge: typeof item.badge === "string" ? item.badge : "",
+    colorClass: typeof item.colorClass === "string" ? item.colorClass : null,
     group: typeof item.group === "string" ? item.group : "",
     href: typeof item.href === "string" ? item.href : null,
     absoluteUrl: typeof item.href === "string" ? item.href : null,
@@ -702,6 +1177,13 @@ function renderHomeUpcomingFromDashboard(dashboard) {
     const courseCell = document.createElement("td");
     courseCell.className = "align-middle";
     courseCell.textContent = item.courseLabel || "Course";
+    if (item.isPrairieTest) {
+      const examBadge = document.createElement("span");
+      examBadge.className = "badge ms-2";
+      examBadge.textContent = "Exam";
+      applyBadgeColorAndPicker(examBadge, { badge: "Exam", isPrairieTest: true, colorClass: item.colorClass }, badgeColorOverridesCache);
+      courseCell.appendChild(examBadge);
+    }
     row.appendChild(courseCell);
 
     const assessmentCell = document.createElement("td");
@@ -739,8 +1221,9 @@ function renderHomeUpcomingFromDashboard(dashboard) {
 
     if (item.badge) {
       const badge = document.createElement("span");
-      badge.className = "badge bg-secondary me-2";
+      badge.className = "badge me-2";
       badge.textContent = item.badge;
+      applyBadgeColorAndPicker(badge, item, badgeColorOverridesCache);
       assessmentCell.appendChild(badge);
     }
 
@@ -751,6 +1234,12 @@ function renderHomeUpcomingFromDashboard(dashboard) {
       link.removeAttribute("href");
     }
     assessmentCell.appendChild(link);
+    if (item.location) {
+      const loc = document.createElement("div");
+      loc.className = "small text-muted";
+      loc.textContent = `📍 ${item.location}`;
+      assessmentCell.appendChild(loc);
+    }
     const calMenu = renderCalendarActionMenu(item, window.location.origin);
     if (calMenu) {
       assessmentCell.appendChild(calMenu);
@@ -765,7 +1254,14 @@ function renderHomeUpcomingFromDashboard(dashboard) {
     const progressCell = document.createElement("td");
     progressCell.className = "align-middle";
     progressCell.style.minWidth = "120px";
-    renderHomeProgressBar(progressCell, item);
+    if (item.isPrairieTest) {
+      const examBadge = document.createElement("span");
+      examBadge.className = "badge bg-primary";
+      examBadge.textContent = "Reserved";
+      progressCell.appendChild(examBadge);
+    } else {
+      renderHomeProgressBar(progressCell, item);
+    }
     row.appendChild(progressCell);
 
     tbody.appendChild(row);
@@ -1132,6 +1628,7 @@ function parseAssessmentsDocument(doc, context) {
     }
 
     const badge = normalizeWhitespace(badgeElement.textContent);
+    const colorClass = Array.from(badgeElement.classList || []).find((c) => c.startsWith("color-")) || null;
     const titleCell = assessmentCellAt(cells, columns.title);
     const linkElement = titleCell?.querySelector("a") || null;
     const title =
@@ -1169,6 +1666,7 @@ function parseAssessmentsDocument(doc, context) {
       courseLabel,
       group: currentGroup,
       badge,
+      colorClass,
       title,
       href,
       absoluteUrl,
@@ -1993,13 +2491,24 @@ async function initCourseAssessmentsFilterToolbar() {
       ? table.parentElement
       : table;
 
-  let summaryCard = document.getElementById("pl-course-progress-summary-card");
-  if (!summaryCard) {
-    summaryCard = document.createElement("div");
-    summaryCard.id = "pl-course-progress-summary-card";
-    summaryCard.className = "card mb-3 p-3 bg-light border shadow-sm";
-    if (targetContainer.parentElement) {
-      targetContainer.parentElement.insertBefore(summaryCard, targetContainer);
+  // Shelved UI feature: Course Progress Summary card
+  const ENABLE_COURSE_PROGRESS_SUMMARY = false;
+
+  let summaryCard = null;
+  if (ENABLE_COURSE_PROGRESS_SUMMARY) {
+    summaryCard = document.getElementById("pl-course-progress-summary-card");
+    if (!summaryCard) {
+      summaryCard = document.createElement("div");
+      summaryCard.id = "pl-course-progress-summary-card";
+      summaryCard.className = "card mb-3 p-3 bg-light border shadow-sm";
+      if (targetContainer.parentElement) {
+        targetContainer.parentElement.insertBefore(summaryCard, targetContainer);
+      }
+    }
+  } else {
+    const existingCard = document.getElementById("pl-course-progress-summary-card");
+    if (existingCard) {
+      existingCard.remove();
     }
   }
 
@@ -2081,6 +2590,7 @@ async function initCourseAssessmentsFilterToolbar() {
       const title = normalizeWhitespace(linkElement?.textContent || titleCell?.textContent) || "Untitled";
       const href = linkElement?.getAttribute("href") || null;
       const badge = normalizeWhitespace(badgeElement?.textContent) || null;
+      const colorClass = Array.from(badgeElement?.classList || []).find((c) => c.startsWith("color-")) || null;
       const availabilityCell = assessmentCellAt(cells, columns.availability);
       const availabilityText = normalizeWhitespace(availabilityCell?.textContent) || null;
       const popoverButton = availabilityCell ? availabilityCell.querySelector('button[data-bs-toggle="popover"]') : null;
@@ -2096,6 +2606,7 @@ async function initCourseAssessmentsFilterToolbar() {
           courseInstanceId,
           group: currentGroup.heading,
           badge,
+          colorClass,
           title,
           href,
           availabilityText,
@@ -2269,7 +2780,7 @@ async function initCourseAssessmentsFilterToolbar() {
   }
 
   function updateSummary() {
-    if (!summaryCard) return;
+    if (!ENABLE_COURSE_PROGRESS_SUMMARY || !summaryCard) return;
     const groups = parseRows();
     const rawItems = groups.flatMap((g) => g.items.map((entry) => entry.item)).filter((i) => !i.isUnknown);
     const engine = getProgressSummaryEngine();
@@ -2331,5 +2842,9 @@ if (typeof window !== "undefined") {
     renderCourseProgressSummaryCard,
     formatSummaryHeadline,
     getProgressSummaryEngine,
+    resolveBadgeColor,
+    getBadgePrefix,
+    applyBadgeStyle,
+    PL_BADGE_PALETTES,
   };
 }

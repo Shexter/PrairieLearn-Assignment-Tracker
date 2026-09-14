@@ -11,9 +11,10 @@
     "offscreen"
   ],
   "host_permissions": [
-    "https://*.prairielearn.com/*"
-    ,"https://accounts.google.com/*"
-    ,"https://www.googleapis.com/*"
+    "https://*.prairielearn.com/*",
+    "https://*.prairietest.com/*",
+    "https://accounts.google.com/*",
+    "https://www.googleapis.com/*"
   ],
   "content_scripts": [
     {
@@ -42,6 +43,15 @@
       "js": [
         "libs/html2canvas.min.js",
         "question-content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.prairietest.com/*"
+      ],
+      "js": [
+        "prairietest-content.js"
       ],
       "run_at": "document_idle"
     }
