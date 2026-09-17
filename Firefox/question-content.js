@@ -9,25 +9,30 @@
   // Failure modes are reported separately: the spec requires "this browser cannot put
   // images on the clipboard" to read differently from "the write was refused", and a
   // capture that came back blank must never reach the clipboard at all.
-  const OUTCOMES = {
-    success: { label: 'Copied!', detail: 'Question copied to the clipboard as a PNG.' },
-    unsupported: {
-      label: 'No image clipboard',
-      detail: 'This browser cannot put images on the clipboard. Firefox needs version 127 or newer.',
-    },
-    refused: {
-      label: 'Clipboard refused',
-      detail: 'The browser refused the clipboard write.',
-    },
-    'capture-failed': {
-      label: 'Capture failed',
-      detail: 'The question panel could not be captured.',
-    },
-    unfaithful: {
-      label: 'Capture unfaithful',
-      detail: 'The capture came back blank or malformed, so nothing was copied to the clipboard.',
-    },
-  };
+  function getOutcome(outcome, panelType = 'question') {
+    const isAnswer = panelType === 'answer';
+    const name = isAnswer ? 'Answer' : 'Question';
+    const outcomes = {
+      success: { label: 'Copied!', detail: `${name} copied to the clipboard as a PNG.` },
+      unsupported: {
+        label: 'No image clipboard',
+        detail: 'This browser cannot put images on the clipboard. Firefox needs version 127 or newer.',
+      },
+      refused: {
+        label: 'Clipboard refused',
+        detail: 'The browser refused the clipboard write.',
+      },
+      'capture-failed': {
+        label: 'Capture failed',
+        detail: `The ${name.toLowerCase()} panel could not be captured.`,
+      },
+      unfaithful: {
+        label: 'Capture unfaithful',
+        detail: 'The capture came back blank or malformed, so nothing was copied to the clipboard.',
+      },
+    };
+    return outcomes[outcome] || outcomes['capture-failed'];
+  }
 
   function clipboardImageSupport() {
     if (typeof ClipboardItem === 'undefined') return false;
@@ -126,24 +131,83 @@
     return 'success';
   }
 
-  function injectScreenshotButton() {
-    const panel = document.querySelector('.question-block')
-      || document.querySelector('.question-body')?.closest('.card')
-      || document.querySelector('.card');
-    if (!panel) return;
+  function isVisible(element) {
+    if (!element) return false;
+    if (element.classList?.contains('d-none')) return false;
+    if (element.hidden) return false;
+    if (element.style?.display === 'none') return false;
+    if (element.closest?.('.d-none, [hidden]')) return false;
+    try {
+      if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+        const style = window.getComputedStyle(element);
+        if (style && style.display === 'none') return false;
+      }
+    } catch {
+      // Ignore getComputedStyle errors if any
+    }
+    return true;
+  }
+
+  function getQuestionPanel() {
+    const candidate = document.querySelector('.question-block')
+      || document.querySelector('.question-body')?.closest('.card');
+    if (candidate) return candidate;
+
+    const cards = document.querySelectorAll('.card');
+    for (const card of cards) {
+      if (!card.classList.contains('grading-block') && !card.querySelector('.answer-body')) {
+        const header = card.querySelector('.card-header');
+        if (!header || !/correct answer/i.test(header.textContent || '')) {
+          return card;
+        }
+      }
+    }
+    return null;
+  }
+
+  function getAnswerPanel() {
+    const candidates = [
+      document.querySelector('.grading-block'),
+      document.querySelector('.answer-body')?.closest('.card'),
+    ];
+    for (const el of candidates) {
+      if (el && isVisible(el)) return el;
+    }
+
+    const cards = document.querySelectorAll('.card');
+    for (const card of cards) {
+      const header = card.querySelector('.card-header');
+      if (header && /correct answer/i.test(header.textContent || '') && isVisible(card)) {
+        return card;
+      }
+    }
+    return null;
+  }
+
+  function injectButtonIntoPanel(panel, panelType) {
+    if (!panel) return null;
 
     const header = panel.querySelector('.card-header');
-    if (!header) return;
+    if (!header) return null;
 
     // Guard against double-inject (home-content.js also runs on all PL pages)
-    if (header.querySelector('.pl-screenshot-btn')) return;
+    const existing = header.querySelector('.pl-screenshot-btn');
+    if (existing) {
+      if (!existing.dataset.plTarget) {
+        existing.dataset.plTarget = panelType;
+      }
+      return existing;
+    }
 
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = 'btn btn-sm btn-light ms-2 pl-screenshot-btn';
+    const hasMsAuto = header.querySelector('.ms-auto');
+    btn.className = `btn btn-sm btn-light ${hasMsAuto ? 'ms-2' : 'ms-auto'} pl-screenshot-btn`;
     btn.style.flexShrink = '0';
     btn.textContent = RESTING_LABEL;
     btn.dataset.plState = 'resting';
+    btn.dataset.plTarget = panelType;
+
     header.style.display = 'flex';
     header.style.alignItems = 'center';
     header.appendChild(btn);
@@ -151,14 +215,15 @@
     btn.addEventListener('click', () => {
       if (btn.disabled) return;
 
+      const typeLabel = panelType === 'answer' ? 'answer' : 'question';
       btn.disabled = true;
       btn.textContent = 'Capturing...';
       btn.dataset.plState = 'capturing';
-      btn.title = 'Capturing the question panel...';
+      btn.title = `Capturing the ${typeLabel} panel...`;
 
       // Exposed so tests can await one capture deterministically.
       btn.plCapturePromise = capture(panel).then((outcome) => {
-        const result = OUTCOMES[outcome] || OUTCOMES['capture-failed'];
+        const result = getOutcome(outcome, panelType);
         btn.textContent = result.label;
         btn.dataset.plState = outcome;
         btn.title = result.detail;
@@ -171,7 +236,36 @@
         return outcome;
       });
     });
+
+    return btn;
   }
 
-  injectScreenshotButton();
+  function injectScreenshotButtons() {
+    const qPanel = getQuestionPanel();
+    if (qPanel) {
+      injectButtonIntoPanel(qPanel, 'question');
+    }
+    const aPanel = getAnswerPanel();
+    if (aPanel) {
+      injectButtonIntoPanel(aPanel, 'answer');
+    }
+  }
+
+  function init() {
+    injectScreenshotButtons();
+
+    if (typeof MutationObserver !== 'undefined' && document.body) {
+      const observer = new MutationObserver(() => {
+        injectScreenshotButtons();
+      });
+      observer.observe(document.body, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['class', 'style', 'hidden'],
+      });
+    }
+  }
+
+  init();
 })();

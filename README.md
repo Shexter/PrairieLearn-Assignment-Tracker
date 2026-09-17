@@ -56,11 +56,11 @@ transcript is kept so you can click again.
 
 ### Screenshot
 
-On a question page, **Screenshot** copies the question panel to the clipboard as
-a PNG — the whole panel, even when it is taller than the window. The control is
-left out of its own image. If the browser cannot accept an image on the
-clipboard, or the capture comes out blank, it says so instead of copying a
-broken image.
+On a question page, **Screenshot** copies the question panel or the correct answer
+panel (when answered) to the clipboard as a PNG — the whole panel, even when it is
+taller than the window. The control is left out of its own image. If the browser
+cannot accept an image on the clipboard, or the capture comes out blank, it says
+so instead of copying a broken image.
 
 ## Browser support
 

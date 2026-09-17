@@ -17,6 +17,17 @@ const QUESTION_PAGE = `<!doctype html><body>
   </div>
 </body>`;
 
+const QUESTION_ANSWERED_PAGE = `<!doctype html><body>
+  <div class="card question-block">
+    <div class="card-header"><span class="qtitle">Question 3</span></div>
+    <div class="card-body question-body">What is the value of x?</div>
+  </div>
+  <div class="card mb-3 grading-block">
+    <div class="card-header bg-secondary text-white"><h2>Correct answer</h2></div>
+    <div class="card-body overflow-x-auto answer-body">x = 42</div>
+  </div>
+</body>`;
+
 /** A canvas whose pixels differ, i.e. a capture that looks like real content. */
 function goodCanvas(blob = { type: "image/png" }) {
   return {
@@ -76,6 +87,7 @@ function load({
         },
       },
     },
+    MutationObserver: dom.window.MutationObserver,
     setTimeout: (fn) => {
       timers.push(fn);
       return timers.length;
@@ -104,9 +116,15 @@ function load({
     timers,
     run,
     button,
+    buttonByTarget: (target) => dom.window.document.querySelector(`.pl-screenshot-btn[data-pl-target="${target}"]`),
     buttons: () => Array.from(dom.window.document.querySelectorAll(".pl-screenshot-btn")),
     async click() {
       const btn = button();
+      btn.click();
+      return btn.plCapturePromise;
+    },
+    async clickTarget(target) {
+      const btn = dom.window.document.querySelector(`.pl-screenshot-btn[data-pl-target="${target}"]`);
       btn.click();
       return btn.plCapturePromise;
     },
@@ -273,6 +291,94 @@ test("the panel, not the viewport, is captured and the scroll offset is compensa
   assert.equal(options.scrollX, 0);
   assert.equal(options.scrollY, -640, "capture is aligned to the panel, not the scroll position");
   assert.equal(options.windowHeight, page.doc.documentElement.scrollHeight);
+});
+
+// --- Requirement: Answer panel capture -------------------------------------------
+
+test("both question and answer panels receive screenshot controls when answer is present", () => {
+  const page = load({ html: QUESTION_ANSWERED_PAGE });
+  assert.equal(page.buttons().length, 2);
+  const qBtn = page.buttonByTarget("question");
+  const aBtn = page.buttonByTarget("answer");
+  assert.ok(qBtn, "question screenshot button exists");
+  assert.ok(aBtn, "answer screenshot button exists");
+  assert.equal(qBtn.textContent, "Screenshot");
+  assert.equal(aBtn.textContent, "Screenshot");
+  assert.equal(qBtn.dataset.plState, "resting");
+  assert.equal(aBtn.dataset.plState, "resting");
+});
+
+test("answer panel with d-none does not get a screenshot button until unhidden", async () => {
+  const html = `<!doctype html><body>
+    <div class="card question-block">
+      <div class="card-header"><span class="qtitle">Question 3</span></div>
+      <div class="card-body question-body">What is the value of x?</div>
+    </div>
+    <div class="card mb-3 grading-block d-none">
+      <div class="card-header bg-secondary text-white"><h2>Correct answer</h2></div>
+      <div class="card-body answer-body">x = 42</div>
+    </div>
+  </body>`;
+  const page = load({ html });
+  assert.equal(page.buttons().length, 1);
+  assert.equal(page.buttonByTarget("answer"), null);
+
+  const gradingBlock = page.doc.querySelector(".grading-block");
+  gradingBlock.classList.remove("d-none");
+
+  // MutationObserver runs on microtask
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(page.buttons().length, 2);
+  assert.ok(page.buttonByTarget("answer"), "answer button injected after unhiding");
+});
+
+test("capturing the answer panel targets the answer block and reports answer success", async () => {
+  let capturedElement;
+  const page = load({
+    html: QUESTION_ANSWERED_PAGE,
+    html2canvas: async (element) => {
+      capturedElement = element;
+      return goodCanvas();
+    },
+  });
+
+  const aBtn = page.buttonByTarget("answer");
+  const pending = page.clickTarget("answer");
+
+  assert.equal(aBtn.disabled, true);
+  assert.equal(aBtn.textContent, "Capturing...");
+  assert.equal(aBtn.dataset.plState, "capturing");
+
+  assert.equal(await pending, "success");
+  assert.equal(aBtn.textContent, "Copied!");
+  assert.equal(aBtn.dataset.plState, "success");
+  assert.equal(aBtn.title, "Answer copied to the clipboard as a PNG.");
+  assert.equal(page.writes.length, 1);
+  assert.equal(capturedElement.classList.contains("grading-block"), true, "captured element is the answer panel");
+
+  page.flushTimers();
+  assert.equal(aBtn.textContent, "Screenshot");
+  assert.equal(aBtn.dataset.plState, "resting");
+});
+
+test("real fixture question-finished-locked.html injects buttons on both question and answer", () => {
+  const html = fs.readFileSync("test/fixtures/question-finished-locked.html", "utf8");
+  const page = load({ html });
+  assert.equal(page.buttons().length, 2);
+  assert.ok(page.buttonByTarget("question"));
+  assert.ok(page.buttonByTarget("answer"));
+
+  page.run();
+  assert.equal(page.buttons().length, 2, "re-running does not duplicate buttons");
+});
+
+test("real fixture question-mathjax.html has hidden answer and only injects question button", () => {
+  const html = fs.readFileSync("test/fixtures/question-mathjax.html", "utf8");
+  const page = load({ html });
+  assert.equal(page.buttons().length, 1);
+  assert.ok(page.buttonByTarget("question"));
+  assert.equal(page.buttonByTarget("answer"), null);
 });
 
 // --- Requirement: Browser support -------------------------------------------------
